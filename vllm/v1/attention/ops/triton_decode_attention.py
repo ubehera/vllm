@@ -38,6 +38,10 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 is_hip_ = current_platform.is_rocm()
+# homeailab sm_121 smem patch 2026-07-26: consumer Blackwell (sm_12x, e.g. GB10) has only 101376B
+# smem/block vs >=160KB on datacenter parts — see num_stages guard below.
+_is_sm12x_ = (not is_hip_) and torch.cuda.is_available() \
+    and torch.cuda.get_device_capability()[0] == 12
 
 logger = logging.getLogger(__name__)
 
@@ -529,6 +533,10 @@ def _decode_grouped_att_m_fwd(
         # Avoid shared memory overflow on NVIDIA when BLOCK_DMODEL is large
         # like non-MLA D_QK=576, BLOCK_DMODEL=1024, BLOCK_H=16
         # exceeds 101376 bytes limit
+        num_stages = 1
+    elif _is_sm12x_ and BLOCK_DMODEL >= 512:
+        # homeailab sm_121 smem patch 2026-07-26: MLA (BLOCK_DMODEL=512 + BLOCK_DPE=64) at num_stages=2 needs
+        # 102400B > 101376B on sm_12x. num_stages=1 fits.
         num_stages = 1
 
     _fwd_grouped_kernel_stage1[grid](
