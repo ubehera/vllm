@@ -767,6 +767,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 self.prefill_backend is not None
                 and prefill_max_seq_len <= attn_metadata.topk_tokens  # type: ignore[attr-defined]
                 and not self._vllm_config.attention_config.sparse_mla_force_mqa
+                # homeailab local patch 2026-07-26: route MHA only when the impl
+                # actually overrides forward_mha. The DSv32 indexer impl inherits
+                # the base-class raise, so pure-prefill batches crashed with
+                # NotImplementedError (config docstring says "when implemented").
+                and type(self.impl).forward_mha is not MLAAttentionImpl.forward_mha
             )
             if not use_mha:
                 num_mqa_tokens = q.size(0)
