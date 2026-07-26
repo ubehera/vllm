@@ -33,6 +33,9 @@ class FlashInferMLASparseSM120Impl(MLAAttentionImpl[FlashInferMLASparseMetadata]
     """SM120 FlashInfer sparse-MLA implementation."""
 
     is_sparse = True
+    # This backend has no forward_mha implementation. Declaring the capability
+    # through upstream's flag routes all prefills through its supported MQA path.
+    supports_dense_mha_prefill = False
 
     def __init__(
         self,
