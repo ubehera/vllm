@@ -1082,7 +1082,9 @@ class DeepseekV2MLAAttention(nn.Module):
             mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
             self.scaling = self.scaling * mscale * mscale
 
-        self.is_v32 = hasattr(config, "index_topk")
+        # homeailab dense-mla patch 2026-07-26: index_topk in (None, 0) => non-DSA
+        # (dense MLA; sm_121 has no sparse DSA kernels) — forum-365937 method
+        self.is_v32 = getattr(config, "index_topk", None) not in (None, 0)
 
         # IndexCache config
         # Refer: https://arxiv.org/abs/2603.12201 for more details.
@@ -1366,7 +1368,9 @@ class DeepseekV2Model(nn.Module):
         self.device = current_platform.device_type
         self.hidden_size = config.hidden_size
         self.vocab_size = config.vocab_size
-        self.is_v32 = hasattr(config, "index_topk")
+        # homeailab dense-mla patch 2026-07-26: index_topk in (None, 0) => non-DSA
+        # (dense MLA; sm_121 has no sparse DSA kernels) — forum-365937 method
+        self.is_v32 = getattr(config, "index_topk", None) not in (None, 0)
         if self.is_v32:
             topk_tokens = config.index_topk
             topk_indices_buffer = torch.empty(
@@ -1624,6 +1628,11 @@ class DeepseekV2Model(nn.Module):
                 if name.endswith(".bias") and name not in params_dict:
                     continue
 
+                # homeailab dense-mla patch 2026-07-26: indexer weights exist in the checkpoint but not in
+                # the dense (is_v32=False) module tree — skip them.
+                if "indexer" in name and name not in params_dict:
+                    continue
+
                 if is_pp_missing_parameter(name, self):
                     continue
 
@@ -1736,6 +1745,10 @@ class DeepseekV2Model(nn.Module):
                             continue
 
                         if is_pp_missing_parameter(name, self):
+                            continue
+
+                        # homeailab dense-mla patch 2026-07-26: skip checkpoint indexer weights (non-DSA run)
+                        if "indexer" in name and name not in params_dict:
                             continue
 
                         param = params_dict[name]
