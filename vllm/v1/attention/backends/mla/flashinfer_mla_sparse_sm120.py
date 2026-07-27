@@ -148,20 +148,37 @@ class FlashInferMLASparseSM120Impl(MLAAttentionImpl[FlashInferMLASparseMetadata]
             flashinfer_trtllm_batch_decode_with_kv_cache_mla,
         )
 
-        out = flashinfer_trtllm_batch_decode_with_kv_cache_mla(
-            query=q.unsqueeze(1),
-            kv_cache=kv_c_and_k_pe_cache.view(torch.uint8).unsqueeze(1),
-            workspace_buffer=self._workspace_buffer,
-            qk_nope_head_dim=self.qk_nope_head_dim,
-            kv_lora_rank=self.kv_lora_rank,
-            qk_rope_head_dim=self.qk_rope_head_dim,
-            block_tables=topk_indices_physical.unsqueeze(1),
-            seq_lens=seq_lens,
-            max_seq_len=attn_metadata.topk_tokens,
-            out=output.unsqueeze(1),
-            bmm1_scale=self.scale,
-            bmm2_scale=1.0,
-            sparse_mla_top_k=attn_metadata.topk_tokens,
-            kv_scale_format=self.kv_scale_format,
-        )
-        return out.squeeze(1), None
+        # homeailab sm121 row-chunk patch 2026-07-27: the sm120 sparse-MLA
+        # decode kernel deadlocks all ranks device-side at >64 query rows under
+        # full engine-context residency on GB10 (48 SMs); rows are independent
+        # (each (seq,token) attends its own top-k KV via its own block_table
+        # row; grid is per-(token,head,split), stage-2 merge never crosses rows
+        # — verified in kernel source + Codex review), so splitting into
+        # <=64-row launches is tolerance-equivalent (split-K reorder on the
+        # ragged tail, not bitwise) and holds the launch-row invariant the
+        # classification threshold cannot. Also lifts the silent 64-concurrent
+        # cap. Preserve upstream's per-row valid-count mask in every chunk.
+        _MAXR = 64
+        _qh = q.unsqueeze(1)
+        _kv = kv_c_and_k_pe_cache.view(torch.uint8).unsqueeze(1)
+        _bt = topk_indices_physical.unsqueeze(1)
+        _out = output.unsqueeze(1)
+        for _lo in range(0, num_actual_toks, _MAXR):
+            _hi = min(_lo + _MAXR, num_actual_toks)
+            flashinfer_trtllm_batch_decode_with_kv_cache_mla(
+                query=_qh[_lo:_hi],
+                kv_cache=_kv,
+                workspace_buffer=self._workspace_buffer,
+                qk_nope_head_dim=self.qk_nope_head_dim,
+                kv_lora_rank=self.kv_lora_rank,
+                qk_rope_head_dim=self.qk_rope_head_dim,
+                block_tables=_bt[_lo:_hi],
+                seq_lens=seq_lens[_lo:_hi],
+                max_seq_len=attn_metadata.topk_tokens,
+                out=_out[_lo:_hi],
+                bmm1_scale=self.scale,
+                bmm2_scale=1.0,
+                sparse_mla_top_k=attn_metadata.topk_tokens,
+                kv_scale_format=self.kv_scale_format,
+            )
+        return output, None
