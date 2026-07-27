@@ -283,7 +283,12 @@ class FlashInferMLASparseMetadataBuilder(
         num_q_heads = vllm_config.model_config.get_num_attention_heads(
             vllm_config.parallel_config
         )
-        threshold = {8: 128, 16: 128, 32: 128, 64: 256, 128: 1024}.get(
+        # homeailab sm121 reorder-threshold patch 2026-07-26: at 8 q-heads/rank (TP=8) the 65..128-row
+        # decode-classified window deadlocks all ranks on GB10 (device spin,
+        # 96%/24W). Production decode is <=16 rows (max_num_seqs 8 x (1+k));
+        # only 65..128-token PROMPTS enter that window. Threshold 128->64 routes
+        # them through the prefill path instead (components standalone-verified).
+        threshold = {8: 64, 16: 128, 32: 128, 64: 256, 128: 1024}.get(
             num_q_heads, 1024
         )
         self._init_reorder_batch_threshold(
