@@ -181,7 +181,11 @@ class RayWorkerProc(WorkerProc):
             input_shm_handle, self.worker.rank
         )
 
-        n_local = 1 if self._is_driver_node else 0
+        n_local = (
+            0
+            if envs.VLLM_RAY_EXECUTOR_V2_FORCE_TCP
+            else (1 if self._is_driver_node else 0)
+        )
         # Use ray.util.get_node_ip_address() to get Ray's internal IP.
         # get_ip() returns host's external IP which is typically not
         # routable between nodes within the cluster.
@@ -336,9 +340,19 @@ class RayExecutorV2(MultiprocExecutor):
         distributed_init_method = get_distributed_init_method(dist_ip, port)
 
         # Step 4: Create broadcast MessageQueue.
-        # Workers on the driver node use shared memory; the rest use TCP.
+        # Workers on the driver node normally use shared memory; the rest use
+        # TCP. The opt-in all-TCP path avoids ShmRingBuffer lifetime races on
+        # platforms where local shared-memory cleanup is unreliable.
         max_chunk_bytes = envs.VLLM_MQ_MAX_CHUNK_BYTES_MB * 1024 * 1024
-        n_local = sum(1 for a in bundle_assignments if a["node_id"] == driver_node)
+        n_local = (
+            0
+            if envs.VLLM_RAY_EXECUTOR_V2_FORCE_TCP
+            else sum(1 for a in bundle_assignments if a["node_id"] == driver_node)
+        )
+        if envs.VLLM_RAY_EXECUTOR_V2_FORCE_TCP:
+            logger.info(
+                "RayExecutorV2 control-plane queues are using TCP on all ranks"
+            )
         self.rpc_broadcast_mq = MessageQueue(
             self.world_size,
             n_local,

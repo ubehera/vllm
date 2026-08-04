@@ -248,6 +248,7 @@ if TYPE_CHECKING:
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
     VLLM_ENFORCE_STRICT_TOOL_CALLING: bool = True
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
+    VLLM_RAY_EXECUTOR_V2_FORCE_TCP: bool = False
     VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS: int = 300
     VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS: int = 5
     VLLM_KV_CACHE_LAYOUT: Literal["NHD", "HND"] | None = None
@@ -1787,6 +1788,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # processes via zmq.
     "VLLM_MQ_MAX_CHUNK_BYTES_MB": lambda: int(
         os.getenv("VLLM_MQ_MAX_CHUNK_BYTES_MB", "16")
+    ),
+    # Route RayExecutorV2 control-plane message queues over TCP, including
+    # workers on the driver node. Model collectives continue to use NCCL.
+    "VLLM_RAY_EXECUTOR_V2_FORCE_TCP": lambda: env_bool(
+        "VLLM_RAY_EXECUTOR_V2_FORCE_TCP"
     ),
     # Timeout in seconds for execute_model RPC calls in multiprocessing
     # executor (only applies when TP > 1).
