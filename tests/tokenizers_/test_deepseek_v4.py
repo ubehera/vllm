@@ -139,7 +139,10 @@ def test_deepseek_v4_honors_official_thinking_request_field():
 
     assert chat_kwargs["thinking"] is True
     assert chat_kwargs["enable_thinking"] is True
-    assert prompt == ("<｜begin▁of▁sentence｜><｜User｜>Hello<｜Assistant｜><think>")
+    assert prompt.startswith(
+        "<｜begin▁of▁sentence｜>Reasoning Effort: Absolute maximum"
+    )
+    assert prompt.endswith("<｜User｜>Hello<｜Assistant｜><think>")
 
 
 def test_deepseek_v4_defaults_to_official_thinking_for_openai_request():
@@ -209,7 +212,7 @@ def test_deepseek_v4_preserves_official_prefix_assistant_message():
 
     assert conversation[1]["prefix"] is True
     assert conversation[1]["wo_eos"] is True
-    assert prompt.endswith("<｜Assistant｜></think>```python\n")
+    assert prompt.endswith("<｜Assistant｜><think></think>```python\n")
     assert not prompt.endswith("<｜end▁of▁sentence｜>")
 
 
@@ -728,8 +731,11 @@ def test_deepseek_v4_merges_consecutive_assistant_messages_drop_thinking():
 
     # Without request tools, reasoning from earlier turns is dropped, but the
     # split turn still renders as a single assistant turn (one EOS).
-    assert prompt == (
-        "<｜begin▁of▁sentence｜><｜User｜>Check the server<｜Assistant｜></think>"
+    assert prompt.startswith(
+        "<｜begin▁of▁sentence｜>Reasoning Effort: Absolute maximum"
+    )
+    assert prompt.endswith(
+        "<｜User｜>Check the server<｜Assistant｜></think>"
         "Let me check the server status.\n\n<｜DSML｜tool_calls>\n"
         '<｜DSML｜invoke name="shell_exec">\n'
         '<｜DSML｜parameter name="command" string="true">'
