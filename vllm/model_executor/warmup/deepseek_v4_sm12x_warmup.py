@@ -986,5 +986,3 @@ _LL_BF16_WARMUP_MODEL_SHAPES: tuple[tuple[int, int], ...] = (
     (14400, 256),  # DSV4-Flash
 )
 _LL_BF16_WARMUP_M_RANGE = range(1, 17)
-
-
