@@ -368,9 +368,6 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
                 if name.endswith(".bias") and name not in params_dict:
                     continue
 
-                # homeailab dense-mla patch 2026-07-26: skip checkpoint indexer weights (MTP draft, non-DSA run)
-                if "indexer" in name and name not in params_dict:
-                    continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
@@ -482,9 +479,6 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
                         ):
                             continue
 
-                        # homeailab dense-mla patch 2026-07-26: skip checkpoint indexer weights (MTP draft, non-DSA run)
-                        if "indexer" in name and name not in params_dict:
-                            continue
                         param = params_dict[name]
                         weight_loader = getattr(
                             param, "weight_loader", default_weight_loader
