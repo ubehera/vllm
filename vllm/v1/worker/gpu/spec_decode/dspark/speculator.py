@@ -81,7 +81,7 @@ class DSparkSpeculator(DFlashSpeculator):
                 self.max_num_reqs,
                 self.num_speculative_steps,
                 self.vocab_size,
-                dtype=torch.float32,
+                dtype=vllm_config.model_config.head_dtype,
                 device=device,
             )
             logger.info("Using DSpark preallocated draft logits for rejection.")
@@ -149,8 +149,8 @@ class DSparkSpeculator(DFlashSpeculator):
             self.seeds,
             sample_pos - 1,
             apply_temperature=True,
-            output_processed_logits=self.draft_logits,
-            output_processed_logits_col=self._step_cols[step],
+            logits_cache=self.draft_logits,
+            logits_cache_col=self._step_cols[step],
             use_fp64=self.use_fp64_gumbel,
         )
 
