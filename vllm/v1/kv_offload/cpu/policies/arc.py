@@ -31,7 +31,7 @@ class ARCCachePolicy(CachePolicy):
            - If in B1 ghost list: Increase target_t1_size.
            - If in B2 ghost list: Decrease target_t1_size.
 
-        3. Block eviction (evict_until) - Adaptive Replacement:
+        3. Block eviction (evict) - Adaptive Replacement:
            Determines eviction source based on adaptive target:
            - If T1 size >= target_t1_size: Evict from T1, add to B1.
            - Otherwise: Evict from T2, add to B2.
@@ -101,20 +101,20 @@ class ARCCachePolicy(CachePolicy):
                 self.b2.move_to_end(key)
 
     @override
-    def evict(
-        self, n: int, protected: set[OffloadKey]
-    ) -> list[tuple[OffloadKey, BlockStatus]] | None:
-        if n == 0:
-            return []
-        return self.evict_until(lambda c: len(c) >= n, protected)
-
-    @override
     def clear(self) -> None:
         self.t1.clear()
         self.t2.clear()
         self.b1.clear()
         self.b2.clear()
         self.target_t1_size = 0.0
+
+    @override
+    def evict(
+        self, n: int, protected: set[OffloadKey]
+    ) -> list[tuple[OffloadKey, BlockStatus]] | None:
+        if n == 0:
+            return []
+        return self.evict_until(lambda c: len(c) >= n, protected)
 
     @override
     def evict_until(
@@ -162,19 +162,23 @@ class ARCCachePolicy(CachePolicy):
 
             candidates.append(candidate)
 
-            if can_fit([(k, b) for k, b, _ in candidates]):
-                result: list[tuple[OffloadKey, BlockStatus]] = []
-                for key, block, from_t1 in candidates:
-                    if from_t1:
-                        del self.t1[key]
-                        self.b1[key] = None
-                    else:
-                        del self.t2[key]
-                        self.b2[key] = None
-                    result.append((key, block))
+            if not can_fit([(k, b) for k, b, _ in candidates]):
+                continue
 
-                for ghost in (self.b1, self.b2):
-                    for _ in range(len(ghost) - self.cache_capacity):
-                        ghost.popitem(last=False)
+            # Apply all evictions now that the collected prefix suffices.
+            result: list[tuple[OffloadKey, BlockStatus]] = []
+            for key, block, from_t1 in candidates:
+                if from_t1:
+                    del self.t1[key]
+                    self.b1[key] = None
+                else:
+                    del self.t2[key]
+                    self.b2[key] = None
+                result.append((key, block))
 
-                return result
+            # Trim ghost lists to cache_capacity.
+            for ghost in (self.b1, self.b2):
+                for _ in range(len(ghost) - self.cache_capacity):
+                    ghost.popitem(last=False)
+
+            return result
