@@ -142,6 +142,7 @@ class RejectionSampler:
         processed_logits = self.sampler.apply_sampling_params(
             logits,
             expanded_idx_mapping,
+            idx_mapping,
             idx_mapping_np,
             pos,
             draft_sampled,
