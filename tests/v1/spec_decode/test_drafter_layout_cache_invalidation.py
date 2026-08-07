@@ -14,6 +14,7 @@ every pure-decode test and probe."""
 
 import ast
 import inspect
+import textwrap
 
 import torch
 
@@ -62,32 +63,25 @@ def test_layout_rewrite_with_invalidation_yields_identity_mapping():
 
 def test_proposer_loop_entry_invalidates_the_mapping_cache():
     """AST pin: the drafter's in-place layout rewrite must clear both caches."""
-    from vllm.v1.spec_decode import llm_base_proposer
+    from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
 
-    src = inspect.getsource(llm_base_proposer)
+    src = textwrap.dedent(inspect.getsource(SpecDecodeBaseProposer.propose))
     tree = ast.parse(src)
     hits = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.Assign):
-            for t in node.targets:
-                if (
-                    isinstance(t, ast.Attribute)
-                    and t.attr in (
-                        "_token_to_req_indices_cache",
-                        "_num_computed_tokens_cache",
-                    )
-                    and isinstance(t.value, ast.Attribute)
-                    and t.value.attr == "common_attn_metadata"
-                    == False  # value is Name for local var; handle both
-                ):
-                    pass
-        if isinstance(node, ast.Assign):
-            for t in node.targets:
-                if isinstance(t, ast.Attribute) and t.attr in (
-                    "_token_to_req_indices_cache",
-                    "_num_computed_tokens_cache",
-                ):
-                    hits.add(t.attr)
+        if not isinstance(node, ast.Assign) or not (
+            isinstance(node.value, ast.Constant) and node.value.value is None
+        ):
+            continue
+        for target in node.targets:
+            if (
+                isinstance(target, ast.Attribute)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == "common_attn_metadata"
+                and target.attr
+                in {"_token_to_req_indices_cache", "_num_computed_tokens_cache"}
+            ):
+                hits.add(target.attr)
     assert hits == {
         "_token_to_req_indices_cache",
         "_num_computed_tokens_cache",

@@ -371,8 +371,11 @@ __device__ __forceinline__ bool moe_sum_pad_aware_skip(
   // the length of the map actually being indexed (the global expert count;
   // the rank-local count is NOT a safe bound under EP). Same contract as
   // get_local_expert_id() above, from which these sites had drifted.
-  if (expert_id < 0 || expert_id >= num_global_experts) return true;
-  if (expert_map != nullptr && expert_map[expert_id] < 0) return true;
+  if (expert_id < 0) return true;
+  if (expert_map != nullptr &&
+      (expert_id >= num_global_experts || expert_map[expert_id] < 0)) {
+    return true;
+  }
   return false;
 }
 

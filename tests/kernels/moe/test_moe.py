@@ -1640,7 +1640,13 @@ def test_moe_sum(m: int, topk: int, k: int, dtype: torch.dtype, layout: str):
 @pytest.mark.parametrize("topk", [2, 8])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("topk_ids_dtype", [torch.int32, torch.int64])
-def test_moe_sum_pad_aware(topk: int, dtype: torch.dtype, topk_ids_dtype: torch.dtype):
+@pytest.mark.parametrize("use_expert_map", [False, True])
+def test_moe_sum_pad_aware(
+    topk: int,
+    dtype: torch.dtype,
+    topk_ids_dtype: torch.dtype,
+    use_expert_map: bool,
+):
     m, k = 17, 128
     input = torch.randn((m, topk, k), device="cuda", dtype=dtype)
 
@@ -1649,13 +1655,18 @@ def test_moe_sum_pad_aware(topk: int, dtype: torch.dtype, topk_ids_dtype: torch.
     topk_ids[0, :] = -1
     topk_ids[1, 0] = -1
 
-    expert_map = torch.tensor([0, -1, 1, -1], device="cuda", dtype=torch.int32)
+    expert_map = (
+        torch.tensor([0, -1, 1, -1], device="cuda", dtype=torch.int32)
+        if use_expert_map
+        else None
+    )
 
     actual = torch.empty((m, k), device="cuda", dtype=dtype)
     torch.ops._moe_C.moe_sum(input, actual, topk_ids, expert_map)
 
-    routed = expert_map[topk_ids.clamp(min=0).long()] >= 0
-    routed &= topk_ids >= 0
+    routed = topk_ids >= 0
+    if expert_map is not None:
+        routed &= expert_map[topk_ids.clamp(min=0).long()] >= 0
     expected = (input.float() * routed.unsqueeze(-1)).sum(dim=1).to(dtype)
 
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=0)

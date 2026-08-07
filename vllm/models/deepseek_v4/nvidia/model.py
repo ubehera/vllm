@@ -938,12 +938,11 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
         return DeepseekV4FlashMLAAttention
 
     # Default-on: route SM12x decode through FlashInfer's official packed sparse-MLA
-    # decode kernel (PR3395, released in flashinfer >= 0.6.13) when present.
-    # Availability-gated, so stock installs without that kernel fall through to
-    # the FlashMLA/Triton-sparse default below instead of raising. We deliberately
-    # do NOT hard-default SM12 to the FlashInfer sparse-MLA class -- that path
-    # needs the unmerged FlashInfer SM120 sparse-MLA fork and raises on released
-    # deps (see #43477).
+    # decode kernel (PR3395, released in flashinfer >= 0.6.14). The gate fails
+    # loudly on an incomplete or mismatched default-on install; operators can set
+    # VLLM_DEEPSEEK_V4_FLASHINFER_SM120_DECODE=0 to select the FlashMLA fallback.
+    # We deliberately do not hard-default SM12x to the full FlashInfer sparse-MLA
+    # class, which still requires a separate backend selection.
     import vllm.envs as envs
 
     if envs.VLLM_DEEPSEEK_V4_FLASHINFER_SM120_DECODE:

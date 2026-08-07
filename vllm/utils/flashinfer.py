@@ -286,7 +286,7 @@ def flashinfer_sm120_sparse_mla_unavailable_reason() -> str | None:
 def has_flashinfer_trtllm_sparse_mla_dsv4() -> bool:
     """Return ``True`` if FlashInfer's official SM120 packed sparse-MLA decode
     kernel (``trtllm_batch_decode_sparse_mla_dsv4``, PR3395, merged in
-    flashinfer >= 0.6.13) is available.
+    flashinfer >= 0.6.14) is available.
 
     Imports every symbol the decode path actually uses, not just the one the
     kernel is named after. Reported by aldc-john-moran on

@@ -635,16 +635,10 @@ def split_decodes_prefills_and_extends(
 def sparse_short_extend_tiering(common_attn_metadata) -> bool:
     """Shared `treat_short_extends_as_decodes` for the DSv4 sparse builders.
 
-    The indexer, the sparse-SWA builder and the C128A builder all slice the SAME
-    ``topk_indices_buffer`` at ``num_decode_tokens``. If they disagree about
-    whether a short extend is a decode, one writes at one boundary and another
-    reads at a different one, so tokens receive each other's top-k indices. The
-    indices stay individually valid (each is a real slot in the owning request's
-    block table), which is why byte-level sentinels and per-slot validity checks
-    do not see it -- the corruption is a misattribution across tokens.
-
-    The disagreement only appears when a batch mixes prefill and decode rows,
-    which is why it requires concurrency to reproduce.
+    A chunked-prefill row must stay on the prefill path even when its query length
+    is below a builder's speculative decode threshold. The builders may use
+    different thresholds to select compatible compute kernels, but they must
+    agree that an actual prefilling row is not a decode.
 
     All three call sites must use this one function so they cannot drift apart.
     """
