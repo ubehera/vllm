@@ -887,7 +887,7 @@ void moe_sum(torch::stable::Tensor& input,   // [num_tokens, topk, hidden_size]
   vllm::moe::moe_sum_vec_kernel<scalar_t, int32_t, TOPK, false>       \
       <<<grid, dim3(block), 0, stream>>>(out_ptr, in_ptr, num_tokens, \
                                          hidden_size, stride_token,   \
-                                         stride_topk, nullptr, nullptr, 0, 0)
+                                         stride_topk, nullptr, nullptr, 0, 0, 0)
 
   VLLM_STABLE_DISPATCH_FLOATING_TYPES(input.scalar_type(), "moe_sum", [&] {
     constexpr int VEC = vllm::moe::MOE_SUM_VEC<scalar_t>;
@@ -930,7 +930,7 @@ void moe_sum(torch::stable::Tensor& input,   // [num_tokens, topk, hidden_size]
           vllm::moe::moe_sum_vec_dynamic_kernel<scalar_t, int32_t, false>
               <<<grid, dim3(block), 0, stream>>>(
                   out_ptr, in_ptr, num_tokens, hidden_size, topk, stride_token,
-                  stride_topk, nullptr, nullptr, 0, 0);
+                  stride_topk, nullptr, nullptr, 0, 0, 0);
           break;
       }
     } else {
@@ -939,7 +939,7 @@ void moe_sum(torch::stable::Tensor& input,   // [num_tokens, topk, hidden_size]
       vllm::moe::moe_sum_scalar_kernel<scalar_t, int32_t, false>
           <<<grid, block, 0, stream>>>(out_ptr, in_ptr, hidden_size, topk,
                                        stride_token, stride_topk, stride_hidden,
-                                       nullptr, nullptr, 0, 0);
+                                       nullptr, nullptr, 0, 0, 0);
     }
   });
 #undef LAUNCH_MOE_SUM_VEC
