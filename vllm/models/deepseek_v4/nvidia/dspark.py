@@ -692,6 +692,10 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
     """DSpark draft model for fixed-block speculative decoding."""
 
     uses_query_start_loc_context_kv = True
+    # This drafter uses the full target vocabulary.  The V2 DSpark speculator
+    # still probes the optional reduced-vocabulary mapping while initializing
+    # its rejection-logit buffer, so expose the interface explicitly.
+    draft_id_to_target_id = None
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
