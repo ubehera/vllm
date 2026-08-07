@@ -130,10 +130,7 @@ class DraftModelSpeculator(BaseSpeculator):
         )
 
         self.draft_logits: torch.Tensor | None = None
-        if (
-            self.speculative_config.draft_sample_method == "probabilistic"
-            and self.method != "dspark"
-        ):
+        if self.speculative_config.draft_sample_method == "probabilistic":
             # Pre-temperature logits, cached from the previous decode step.
             self.draft_logits = torch.zeros(
                 self.max_num_reqs,
