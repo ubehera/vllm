@@ -6,10 +6,10 @@ set -e
 
 # Default values
 # Keep DEEPGEMM_GIT_REF in sync with cmake/external_projects/deepgemm.cmake
-DEEPGEMM_GIT_REPO="https://github.com/deepseek-ai/DeepGEMM.git"
-# Pinned nv-dev revision with the SM120 scale-layout fixes used by the GB10
-# DeepGEMM MXFP4 path.
-DEEPGEMM_GIT_REF="a6b593d2826719dcf4892609af7b84ee23aaf32a"
+DEEPGEMM_GIT_REPO="https://github.com/vllm-project/DeepGEMM.git"
+# Pinned nv_dev+situ merge with the later SM120 scale-layout transforms used
+# by the GB10 DeepGEMM MXFP4 path.
+DEEPGEMM_GIT_REF="5f33a18079e96d26d5869c9759657eb6150f31b1"
 WHEEL_DIR=""
 
 # Parse command line arguments

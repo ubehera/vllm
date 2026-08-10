@@ -28,10 +28,10 @@ if(DEEPGEMM_SRC_DIR)
   message(STATUS "DeepGEMM using local DEEPGEMM_SRC_DIR: ${deepgemm_SOURCE_DIR}")
 else()
   # Keep in sync with tools/install_deepgemm.sh
-  set(_DEEPGEMM_UPSTREAM_REPO "https://github.com/deepseek-ai/DeepGEMM.git")
-  # Pinned nv-dev revision with the SM120 scale-layout fixes used by the GB10
-  # DeepGEMM MXFP4 path. Keep in sync with tools/install_deepgemm.sh.
-  set(_DEEPGEMM_UPSTREAM_TAG "a6b593d2826719dcf4892609af7b84ee23aaf32a")
+  set(_DEEPGEMM_UPSTREAM_REPO "https://github.com/vllm-project/DeepGEMM.git")
+  # Pinned nv_dev+situ merge with the later SM120 scale-layout transforms used
+  # by the GB10 DeepGEMM MXFP4 path. Keep in sync with the installer.
+  set(_DEEPGEMM_UPSTREAM_TAG "5f33a18079e96d26d5869c9759657eb6150f31b1")
 
   set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _deepgemm_fc_root)
