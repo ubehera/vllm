@@ -692,6 +692,7 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
     """DSpark draft model for fixed-block speculative decoding."""
 
     uses_query_start_loc_context_kv = True
+    draft_id_to_target_id = None
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -959,6 +960,15 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         return self.logits_processor(self.head, hidden_states)
+
+    def compute_draft_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # Full-vocab draft: base logits, no d2t scatter.
+        logits = self.compute_logits(hidden_states)
+        assert logits is not None
+        return logits
+
+    def map_draft_to_target(self, draft_ids: torch.Tensor) -> torch.Tensor:
+        return draft_ids  # full-vocab: draft ids are target ids
 
     def _markov_w1_embedding(self, prev_token_ids: torch.Tensor) -> torch.Tensor:
         return self.markov_w1(prev_token_ids.long())

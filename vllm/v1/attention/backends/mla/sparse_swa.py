@@ -23,11 +23,15 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
     MultipleOf,
+    get_spec_decode_max_query_len,
 )
 from vllm.v1.attention.backends.mla.sparse_mla_env import (
     is_triton_sparse_mla_enabled,
 )
-from vllm.v1.attention.backends.utils import split_decodes_and_prefills
+from vllm.v1.attention.backends.utils import (
+    sparse_short_extend_tiering,
+    split_decodes_and_prefills,
+)
 from vllm.v1.attention.ops.flashmla import FlashMLASchedMeta, get_mla_metadata
 from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
@@ -429,10 +433,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         # reorder-threshold vote (which takes the min across builders) so that it
         # cannot drag flashmla_sparse's much larger MHA-routing threshold down;
         # its own split uses self.decode_threshold.
-        spec_mult = (
-            2 if (spec_config is not None and spec_config.parallel_drafting) else 1
-        )
-        self.decode_threshold = 1 + spec_mult * self.num_speculative_tokens
+        self.decode_threshold = get_spec_decode_max_query_len(self.vllm_config)
         self.reorder_batch_threshold = None
 
         hf_config = self.vllm_config.model_config.hf_config
@@ -526,7 +527,13 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         # Split into decode and prefill portions using configurable threshold
         (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens) = (
             split_decodes_and_prefills(
-                common_attn_metadata, decode_threshold=self.decode_threshold
+                common_attn_metadata,
+                decode_threshold=self.decode_threshold,
+                # Must match the indexer and the C128A builder: all three slice
+                # the shared topk_indices_buffer at num_decode_tokens.
+                treat_short_extends_as_decodes=sparse_short_extend_tiering(
+                    common_attn_metadata
+                ),
             )
         )
 
@@ -658,9 +665,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
                 else None
             ),
             prefill_swa_lens=(
-                self.prefill_swa_lens[:num_prefill_tokens]
-                if want_prefill_swa
-                else None
+                self.prefill_swa_lens[:num_prefill_tokens] if want_prefill_swa else None
             ),
             block_size=self.block_size,
             num_decodes=num_decodes,

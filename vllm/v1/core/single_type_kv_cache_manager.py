@@ -6,6 +6,7 @@ from collections import defaultdict, deque
 from collections.abc import Sequence
 from typing import ClassVar
 
+from vllm import envs
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (
@@ -118,6 +119,18 @@ class SingleTypeKVCacheManager(ABC):
         # determining the attention groups.
         self.use_eagle = False
 
+        # Same-step ghost-block defer guard (upstream PR #42359, unmerged).
+        # Full blocks whose hashes were published during the current scheduling
+        # step. Their KV has not been written by the GPU yet, so a request
+        # admitted later in the SAME step must not be allowed to hit them.
+        self.cached_blocks_this_step: set[BlockHashWithGroupId] = set()
+
+        # Mode used when VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT is UNSET.
+        # KVCacheCoordinator raises this to 2 when prefix caching and speculative
+        # decoding are both on. It stays 0 for a manager constructed directly,
+        # which is what keeps the step-agnostic upstream tests passing.
+        self._guard_default_mode: int = 0
+
         # Partial-hit copy-on-write bookkeeping. Populated only by fine-grained
         # managers (full attention, mamba "align"); harmlessly empty elsewhere.
         self._partial_hit_reqs: dict[str, tuple[int, KVCacheBlock]] = {}
@@ -131,6 +144,31 @@ class SingleTypeKVCacheManager(ABC):
         self._pending_partial_tail_offloads: list[
             tuple[str, int, KVCacheBlock, int]
         ] = []
+
+    @property
+    def _ghost_block_guard_enabled(self) -> bool:
+        """Whether to defer same-step prefix hits on not-yet-written blocks.
+
+        Evaluated on every call rather than cached in ``__init__``: this fork
+        sets ``use_eagle`` on the manager *after* construction (the coordinator
+        assigns it once the attention groups are known), so reading it at
+        construction time would always see ``False`` and silently disable the
+        guard. ``MambaManager`` overrides this to always-on (PR #29387).
+        """
+        mode = envs.VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT
+        if mode is None:
+            # unset: the engine decides (see KVCacheCoordinator). An explicit
+            # value -- including 0 -- always wins over this.
+            mode = self._guard_default_mode
+        # 2 = every group, ignoring use_eagle. Upstream gates on use_eagle
+        # because it framed this as a spec-decode issue, but the race is in
+        # block publication and applies to any group with prefix caching on.
+        # On DeepSeek-V4 only the sliding-window groups are flagged as eagle
+        # groups, so upstream's gate leaves MLAAttentionManager -- the main
+        # attention path -- unguarded (measured: 2/5 managers active).
+        if mode >= 2:
+            return True
+        return bool(mode) and self.use_eagle
 
     @classmethod
     def _get_num_evictable_blocks(cls, blocks: Sequence[KVCacheBlock]):
@@ -181,6 +219,20 @@ class SingleTypeKVCacheManager(ABC):
         Returns:
             The number of blocks to allocate.
         """
+
+        # Same-step ghost-block defer guard (upstream PR #42359).
+        # If the prefix-hit tail is a block another request published earlier in
+        # THIS scheduling step, the GPU has not written its KV yet. Returning an
+        # impossible block count makes `allocate_slots` return None, so the
+        # scheduler defers this request to the next step. Checking only the tail
+        # is sufficient: this step's publications are always a suffix of the
+        # published range, so an older tail implies older predecessors.
+        if (
+            self._ghost_block_guard_enabled
+            and len(new_computed_blocks) > 0
+            and new_computed_blocks[-1].block_hash in self.cached_blocks_this_step
+        ):
+            return self.block_pool.num_gpu_blocks + 1
 
         num_required_blocks = cdiv(num_tokens, self.block_size)
         if apply_admission_cap and self._max_admission_blocks_per_request is not None:
@@ -562,6 +614,22 @@ class SingleTypeKVCacheManager(ABC):
 
         self.num_cached_block[request.request_id] = num_full_blocks
 
+        # Same-step ghost-block defer guard (upstream PR #42359): record the
+        # blocks published by this call so a request admitted later in the same
+        # scheduling step is deferred rather than allowed to read their KV
+        # before the GPU has written it. Every subclass that overrides
+        # `cache_blocks` on the DeepSeek-V4 path (FullAttention, MLA,
+        # SlidingWindowMLA, Mamba) delegates here via super(), so recording in
+        # the base covers them all. CrossAttentionManager does not delegate and
+        # is therefore not covered -- upstream's patch does not cover it either.
+        if self._ghost_block_guard_enabled:
+            for block in self.req_to_blocks[request.request_id][
+                num_cached_blocks:num_full_blocks
+            ]:
+                if block.is_null or block.block_hash is None:
+                    continue
+                self.cached_blocks_this_step.add(block.block_hash)
+
     @classmethod
     def reachable_block_mask(
         cls,
@@ -758,7 +826,11 @@ class SingleTypeKVCacheManager(ABC):
         return 0
 
     def new_step_starts(self) -> None:
-        return None
+        # Same-step ghost-block defer guard (upstream PR #42359): the set only
+        # constrains admissions within one scheduling step, so clear it here.
+        # No-op when the guard is disabled.
+        if self._ghost_block_guard_enabled:
+            self.cached_blocks_this_step.clear()
 
 
 class FullAttentionManager(SingleTypeKVCacheManager):
@@ -1505,6 +1577,13 @@ class MambaManager(SingleTypeKVCacheManager):
             # into a private cow_block; we record that block for connector
             # offload (see _pending_partial_tail_offloads).
             self._producer_partial_tail_reqs: dict[str, int] = {}
+
+    @property
+    def _ghost_block_guard_enabled(self) -> bool:
+        # Mamba's recurrent state cannot tolerate a same-step hit on a block
+        # whose KV is unwritten, regardless of speculative decoding (PR #29387).
+        # Always on here, unlike the env-gated base-class default.
+        return True
 
     @classmethod
     def find_longest_cache_hit(

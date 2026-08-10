@@ -35,7 +35,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     get_sliding_window_size_in_chunks,
     is_store_reachable_swa_chunk,
 )
-from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.kv_cache_interface import (
@@ -108,8 +107,8 @@ def test_partial_tail_store_uses_attention_and_recurrent_cow_sources():
     req_status = scheduler._req_status["req"]
     req_status.group_states[0].block_ids[:] = [11, 12]
     req_status.group_states[1].block_ids[:] = [0, 21]
-    scheduler.manager.prepare_store.side_effect = (
-        lambda keys, req_context: generate_store_output(keys)
+    scheduler.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output(keys)
     )
 
     output = SimpleNamespace(partial_tail_offloads={"req": [(1, 99, 28)]})

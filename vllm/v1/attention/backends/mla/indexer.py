@@ -30,10 +30,12 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
     MultipleOf,
+    get_spec_decode_max_query_len,
 )
 from vllm.v1.attention.backends.mla.compressor_utils import get_compressed_slot_mapping
 from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
+    sparse_short_extend_tiering,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
@@ -526,7 +528,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         )
 
         next_n = self.num_speculative_tokens + 1
-        self.decode_threshold = next_n
+        self.decode_threshold = get_spec_decode_max_query_len(self.vllm_config)
         self.reorder_batch_threshold = None
         # NOTE: SM100 datacenter GPUs support any next_n natively via the
         # multi-atom paged MQA logits kernels (FP8 and FP4 indexer
@@ -795,10 +797,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         seq_lens = common_attn_metadata.seq_lens
         slot_mapping = common_attn_metadata.slot_mapping
         block_table = common_attn_metadata.block_table_tensor
-        has_prefilling_rows = (
-            common_attn_metadata.is_prefilling is not None
-            and torch.any(common_attn_metadata.is_prefilling).item()
-        )
         dcp_local_seq_lens = common_attn_metadata.dcp_local_seq_lens
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
@@ -806,7 +804,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 common_attn_metadata,
                 decode_threshold=self.decode_threshold,
                 require_uniform=not self.use_flattening,
-                treat_short_extends_as_decodes=not has_prefilling_rows
+                treat_short_extends_as_decodes=sparse_short_extend_tiering(
+                    common_attn_metadata
+                )
                 and not self.use_pcp,
             )
         )

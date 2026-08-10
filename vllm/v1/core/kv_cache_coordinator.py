@@ -6,6 +6,7 @@ from math import lcm
 from typing import NamedTuple
 
 from vllm import envs
+from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
@@ -26,6 +27,8 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
 )
 from vllm.v1.request import Request
+
+logger = init_logger(__name__)
 
 
 def _validate_prefix_cache_retention_interval(
@@ -121,6 +124,25 @@ class KVCacheCoordinator(ABC):
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
+
+        # Same-step ghost-block guard default (PR #42359). The race needs prefix
+        # caching to publish a block hash before the forward writes its KV, and a
+        # second request admitted in the same step to match it; speculative
+        # decoding is what makes that overlap routine. When both are on and the
+        # operator has expressed no preference, default the guard ON -- otherwise
+        # the shipped default configuration (V2 runner + prefix caching + DSpark)
+        # is exactly the one measured at arthur c=12 mean 11.5 with 3 of 4 serves
+        # degraded and a floor of 3/24.
+        #
+        # Set here, in the base __init__, so every coordinator subclass inherits
+        # it and both flags are genuinely in scope. Deliberately NOT in envs.py:
+        # a manager constructed directly must still resolve to OFF, which is what
+        # keeps the step-agnostic tests in tests/v1/core/test_prefix_caching.py
+        # passing. An explicit VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT --
+        # including 0 -- overrides this.
+        if enable_caching and use_eagle:
+            for manager in self.single_type_managers:
+                manager._guard_default_mode = 2
 
         # A positive retention interval must be a multiple of the base hit granularity
         # (``scheduler_block_size``) to land on real cache-hit boundaries.
@@ -672,6 +694,23 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             if group.use_eagle:
                 for gid in group.group_ids:
                     self.single_type_managers[gid].use_eagle = True
+
+        # Report the same-step ghost-block guard's actual state (PR #42359).
+        # Explicit env configuration wins; otherwise prefix-cached eagle groups
+        # enable the default for every coordinated manager. Logging the active
+        # count makes an A/B of the effective policy verifiable instead of
+        # inferred from configuration alone.
+        active = [
+            type(m).__name__
+            for m in self.single_type_managers
+            if m._ghost_block_guard_enabled
+        ]
+        logger.info(
+            "Same-step ghost-block guard: %d/%d managers active%s",
+            len(active),
+            len(self.single_type_managers),
+            f" ({', '.join(sorted(set(active)))})" if active else "",
+        )
 
         # The LCM of the block sizes of all attention types.
         # The cache hit length must be a multiple of the LCM of the block sizes

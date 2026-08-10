@@ -119,7 +119,7 @@ class DSparkSpeculator(DFlashSpeculator):
 
     def clear_runtime_draft_logits(self) -> None:
         # The persistent draft_logits buffer is graph-written every draft step.
-        # Do not clear it; rejection only reads rows selected by idx_map.
+        # Do not clear it; rejection reads only rows selected by idx_map.
         pass
 
     def _sample_logits(

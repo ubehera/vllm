@@ -86,6 +86,7 @@ if TYPE_CHECKING:
     VLLM_MAIN_CUDA_VERSION: str = "13.0"
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
+    VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT: int | None = None
     VLLM_TRITON_USE_TD: bool | None = None
     # Deprecated alias of VLLM_TRITON_USE_TD (removed in v0.25).
     VLLM_TRITON_ATTN_USE_TD: bool | None = None
@@ -643,6 +644,43 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable batch-invariant mode: deterministic results regardless of
     # batch composition. Requires NVIDIA GPU with compute capability >= 9.0.
     "VLLM_BATCH_INVARIANT": lambda: bool(int(os.getenv("VLLM_BATCH_INVARIANT", "0"))),
+    # Same-step ghost-block defer guard (upstream PR #42359, unmerged).
+    # A block's hash is published to the shared BlockPool at SCHEDULING time,
+    # before the forward pass writes its KV, so another request admitted in the
+    # same step can match it and read unwritten values. MambaManager has guarded
+    # against this since #29387; every other manager -- including the MLA ones
+    # DeepSeek-V4 uses -- does not. Defers such a reader by one scheduling step.
+    # 0 = off, 1 = upstream semantics (gated on use_eagle), 2 = every group.
+    #
+    # UNSET (None) means "let the engine decide": KVCacheCoordinator turns the
+    # guard on for any group when prefix caching AND speculative decoding are both
+    # active, which is the only configuration where the race can bite. An explicit
+    # 0/1/2 always wins, so `=0` remains a real escape hatch.
+    #
+    # It resolves to OFF for a manager constructed directly, which is what keeps
+    # the upstream suite green: 11 tests in
+    # tests/v1/core/test_prefix_caching.py call allocate_slots repeatedly to
+    # represent SUCCESSIVE scheduling steps without ever calling
+    # new_step_starts() (the whole file calls it once). With the guard on they
+    # are treated as one step and legitimately deferred, so they fail. The tests
+    # are step-agnostic rather than wrong, but flipping the default here would
+    # fork 11 upstream tests and break every future test written the same way.
+    # OUR DEPLOYMENT SETS 2 (see scripts/dgx_spark_start_mp_serve.sh).
+    #
+    # Measured on DeepSeek-V4 (2-node TP=2, DSpark, fp8 KV,
+    # prefix caching on), 4 fresh serves per arm, 3 arthur c=12 runs each:
+    #   guard off -> 3 of 4 serves lose long-context recall, 2 into single
+    #                digits; gate mean 11.5, min 3 of 24
+    #   guard on  -> 4 of 4 serves at 20-23; gate mean 22.0, min 20
+    #   Mann-Whitney U p = 0.0043
+    # It also lifts the default V1 runner from 20.7 to 23.0, so this is not a
+    # V2-only fix. Mode 1 is upstream's gate, which covers only 2 of 5 managers
+    # on this model and leaves the main MLA path unguarded -- hence 2.
+    "VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT": lambda: (
+        None
+        if os.getenv("VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT") is None
+        else int(os.environ["VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT"])
+    ),
     # Use tensor descriptors for Q/K/V loads and output stores in the
     # Triton unified-attention kernel.  Enables HW 2D block reads on
     # Intel XPU; the non-TD branch is dead-code-eliminated at Triton
@@ -1962,9 +2000,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # DSpark branch-local CUDA graph controls. Stable DSpark fast-path kernels
     # default on through SpeculativeConfig and are not environment-gated.
-    "VLLM_DSPARK_FORWARD_CUDAGRAPH": lambda: env_bool(
-        "VLLM_DSPARK_FORWARD_CUDAGRAPH"
-    ),
+    "VLLM_DSPARK_FORWARD_CUDAGRAPH": lambda: env_bool("VLLM_DSPARK_FORWARD_CUDAGRAPH"),
     "VLLM_DSPARK_FORWARD_CUDAGRAPH_ALLOW_TP": lambda: env_bool(
         "VLLM_DSPARK_FORWARD_CUDAGRAPH_ALLOW_TP"
     ),

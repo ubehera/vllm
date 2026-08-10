@@ -162,7 +162,6 @@ def test_dspark_sequential_sampling_writes_persistent_draft_logits(monkeypatch):
     )
 
     class FakeModel:
-
         def compute_draft_logits(self, hidden_states):
             return torch.arange(
                 hidden_states.shape[0] * vocab_size,
@@ -223,5 +222,7 @@ def test_dspark_sequential_sampling_writes_persistent_draft_logits(monkeypatch):
         )
 
     draft_logits = speculator.draft_logits
+    draft_logits_before_clear = draft_logits.clone()
     DSparkSpeculator.clear_runtime_draft_logits(speculator)
     assert speculator.draft_logits is draft_logits
+    torch.testing.assert_close(speculator.draft_logits, draft_logits_before_clear)

@@ -138,64 +138,6 @@ def _assert_distribution_match(
     )
 
 
-def test_dense_draft_logits_index_mapping_matches_state_indexed():
-    torch.manual_seed(0)
-    device = "cuda"
-    num_speculative_steps = 3
-    num_trials = 128
-    target_logits_1d = torch.randn(VOCAB_SIZE, device=device, dtype=torch.float32)
-    draft_logits_1d = torch.randn(VOCAB_SIZE, device=device, dtype=torch.float32)
-    inputs = _build_rejection_sample_inputs(
-        target_logits_1d,
-        draft_logits_1d,
-        num_speculative_steps,
-        temperature=1.0,
-        num_trials=num_trials,
-    )
-
-    state_ids = torch.randperm(num_trials, device=device).to(torch.int32)
-    dense_rows = torch.arange(num_trials, dtype=torch.int32, device=device)
-    seed = torch.empty_like(inputs["seed"])
-    seed[state_ids.long()] = inputs["seed"]
-
-    state_indexed_draft_logits = torch.empty_like(inputs["draft_logits"])
-    state_indexed_draft_logits[state_ids.long()] = inputs["draft_logits"]
-    state_indexed_inputs = dict(inputs)
-    state_indexed_inputs["idx_mapping"] = state_ids
-    state_indexed_inputs["expanded_idx_mapping"] = state_ids.repeat_interleave(
-        num_speculative_steps + 1
-    )
-    state_indexed_inputs["seed"] = seed
-    state_indexed_inputs["draft_logits"] = state_indexed_draft_logits
-
-    dense_index_mapping = torch.empty(
-        num_trials,
-        dtype=torch.int32,
-        device=device,
-    )
-    dense_index_mapping[state_ids.long()] = dense_rows
-    dense_inputs = dict(state_indexed_inputs)
-    dense_inputs["draft_logits"] = inputs["draft_logits"]
-
-    state_sampled, state_num_sampled = rejection_sample(
-        **state_indexed_inputs,
-        num_speculative_steps=num_speculative_steps,
-    )
-    dense_sampled, dense_num_sampled = rejection_sample(
-        **dense_inputs,
-        num_speculative_steps=num_speculative_steps,
-        draft_logits_index_mapping=dense_index_mapping,
-    )
-
-    torch.testing.assert_close(dense_num_sampled, state_num_sampled)
-    for req_idx in range(num_trials):
-        n = state_num_sampled[req_idx].item()
-        torch.testing.assert_close(
-            dense_sampled[req_idx, :n],
-            state_sampled[req_idx, :n],
-        )
-
-
 @pytest.mark.parametrize(
     "num_speculative_steps,temperature",
     [

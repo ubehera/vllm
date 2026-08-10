@@ -1658,6 +1658,14 @@ def test_moe_sum_pad_aware(topk: int, dtype: torch.dtype, topk_ids_dtype: torch.
 
     opcheck(torch.ops._moe_C.moe_sum, (input, actual, topk_ids, expert_map))
 
+    # Without an expert map, positive IDs are still valid routing slots. The
+    # global-expert bound exists only to protect an expert_map lookup.
+    torch.ops._moe_C.moe_sum(input, actual, topk_ids)
+    expected = (input.float() * (topk_ids >= 0).unsqueeze(-1)).sum(dim=1).to(dtype)
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=0)
+
+    opcheck(torch.ops._moe_C.moe_sum, (input, actual, topk_ids))
+
 
 def _batched_fused_marlin_moe_cases() -> list[Any]:
     cases = [

@@ -620,6 +620,15 @@ class AttentionCGSupport(Enum):
     """NO cudagraph support"""
 
 
+def get_spec_decode_max_query_len(vllm_config: "VllmConfig") -> int:
+    """Return the largest decode query length scheduled in one step."""
+    speculative_config = vllm_config.speculative_config
+    if speculative_config is None or speculative_config.num_speculative_tokens is None:
+        return 1
+    multiplier = 2 if speculative_config.parallel_drafting else 1
+    return 1 + multiplier * speculative_config.num_speculative_tokens
+
+
 class AttentionMetadataBuilder(ABC, Generic[M]):
     # Does this backend/builder support CUDA Graphs for attention (default: no).
     # Do not access directly. Call get_cudagraph_support() instead.
@@ -667,20 +676,10 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
             # If the backend supports spec-as-decode kernels, then we can set
             # the reorder_batch_threshold based on the number of speculative
             # tokens from the config.
-            speculative_config = self.vllm_config.speculative_config
-            if (
-                speculative_config is not None
-                and speculative_config.num_speculative_tokens is not None
-            ):
-                max_num_queries_for_spec = (
-                    1
-                    + (2 if speculative_config.parallel_drafting else 1)
-                    * speculative_config.num_speculative_tokens
-                )
-                self.reorder_batch_threshold = max(
-                    self.reorder_batch_threshold,
-                    max_num_queries_for_spec,
-                )
+            self.reorder_batch_threshold = max(
+                self.reorder_batch_threshold,
+                get_spec_decode_max_query_len(self.vllm_config),
+            )
 
         if (
             self.vllm_config.parallel_config.decode_context_parallel_size > 1

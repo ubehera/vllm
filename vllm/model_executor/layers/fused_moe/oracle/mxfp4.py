@@ -1284,7 +1284,8 @@ def convert_weight_to_mxfp4_moe_kernel_format(
 ]:
     """Convert loaded weights into backend-specific kernel format.
 
-    Supports DeepGEMM, FlashInfer TRTLLM/CUTLASS, Triton and Marlin backends.
+    Supports DeepGEMM, FlashInfer, TRTLLM MXFP8, CUTLASS MXFP8, Triton and
+    Marlin backends.
     """
     is_gfx1250 = False
     if current_platform.is_rocm():

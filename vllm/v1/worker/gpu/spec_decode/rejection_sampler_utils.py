@@ -135,8 +135,6 @@ def _compute_global_logprobs_and_logsumexp(
     draft_logits_ptr,
     draft_logits_stride_0,
     draft_logits_stride_1,
-    # [max_num_reqs]
-    draft_logits_index_mapping_ptr,
     # [num_logits, num_blocks]
     draft_local_max_ptr,
     draft_local_max_stride,
@@ -145,7 +143,6 @@ def _compute_global_logprobs_and_logsumexp(
     vocab_num_blocks,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
-    DRAFT_LOGITS_USE_INDEX_MAPPING: tl.constexpr,
 ):
     target_logit = tl.load(
         target_logits_ptr + logit_idx * target_logits_stride + token,
@@ -163,16 +160,11 @@ def _compute_global_logprobs_and_logsumexp(
     )
     target_log_prob = target_logit - target_lse
     if HAS_DRAFT_LOGITS:
-        draft_logits_idx = req_state_idx
-        if DRAFT_LOGITS_USE_INDEX_MAPPING:
-            draft_logits_idx = tl.load(
-                draft_logits_index_mapping_ptr + req_state_idx
-            ).to(tl.int64)
         # draft_logits is stored pre-temperature, so apply scale first.
         draft_logit = (
             tl.load(
                 draft_logits_ptr
-                + draft_logits_idx * draft_logits_stride_0
+                + req_state_idx * draft_logits_stride_0
                 + draft_step * draft_logits_stride_1
                 + token,
                 mask=mask,
@@ -221,8 +213,6 @@ def _compute_local_logits_stats_kernel(
     draft_logits_ptr,
     draft_logits_stride_0,
     draft_logits_stride_1,
-    # [max_num_reqs]
-    draft_logits_index_mapping_ptr,
     # [num_logits]
     expanded_idx_mapping_ptr,
     # [num_logits]
@@ -233,7 +223,6 @@ def _compute_local_logits_stats_kernel(
     num_speculative_steps,
     BLOCK_SIZE: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
-    DRAFT_LOGITS_USE_INDEX_MAPPING: tl.constexpr,
 ):
     logit_idx = tl.program_id(0).to(tl.int64)
     draft_step_idx = tl.load(expanded_local_pos_ptr + logit_idx)
@@ -257,7 +246,8 @@ def _compute_local_logits_stats_kernel(
             other=float("-inf"),
         ).to(tl.float32)
         value, idx = tl.max(target_logits, axis=0, return_indices=True)
-        token_id = block_idx * BLOCK_SIZE + idx
+        # See gumbel.py: degenerate tiles must not emit ids >= vocab_size.
+        token_id = tl.minimum(block_idx * BLOCK_SIZE + idx, vocab_size - 1)
         tl.store(
             target_local_argmax_ptr
             + logit_idx * target_local_argmax_stride
@@ -287,17 +277,12 @@ def _compute_local_logits_stats_kernel(
             target_sumexp,
         )
         if HAS_DRAFT_LOGITS:
-            draft_logits_idx = req_state_idx
-            if DRAFT_LOGITS_USE_INDEX_MAPPING:
-                draft_logits_idx = tl.load(
-                    draft_logits_index_mapping_ptr + req_state_idx
-                ).to(tl.int64)
             # Get local draft max and summed exponentials. draft_logits is
             # stored pre-temperature, so apply scale first.
             draft_logits = (
                 tl.load(
                     draft_logits_ptr
-                    + draft_logits_idx * draft_logits_stride_0
+                    + req_state_idx * draft_logits_stride_0
                     + draft_step_idx * draft_logits_stride_1
                     + block_offsets,
                     mask=mask,
@@ -337,8 +322,6 @@ def _compute_cumulative_log_p_kernel(
     draft_logits_ptr,
     draft_logits_stride_0,
     draft_logits_stride_1,
-    # [max_num_reqs]
-    draft_logits_index_mapping_ptr,
     # [num_logits, num_blocks]
     draft_local_max_ptr,
     draft_local_max_stride,
@@ -354,7 +337,6 @@ def _compute_cumulative_log_p_kernel(
     vocab_num_blocks,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
-    DRAFT_LOGITS_USE_INDEX_MAPPING: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_idx).to(tl.int64)
@@ -389,7 +371,6 @@ def _compute_cumulative_log_p_kernel(
                     draft_logits_ptr,
                     draft_logits_stride_0,
                     draft_logits_stride_1,
-                    draft_logits_index_mapping_ptr,
                     draft_local_max_ptr,
                     draft_local_max_stride,
                     draft_local_sumexp_ptr,
@@ -397,7 +378,6 @@ def _compute_cumulative_log_p_kernel(
                     vocab_num_blocks,
                     PADDED_VOCAB_NUM_BLOCKS,
                     HAS_DRAFT_LOGITS,
-                    DRAFT_LOGITS_USE_INDEX_MAPPING,
                 )
             )
             log_p = tl.minimum(log_p + (target_logprob - draft_logprob), 0.0)
@@ -424,8 +404,6 @@ def _compute_local_residual_mass_kernel(
     draft_logits_ptr,
     draft_logits_stride_0,
     draft_logits_stride_1,
-    # [max_num_reqs]
-    draft_logits_index_mapping_ptr,
     # [num_logits, num_blocks]
     draft_local_max_ptr,
     draft_local_max_stride,
@@ -445,7 +423,6 @@ def _compute_local_residual_mass_kernel(
     vocab_num_blocks,
     BLOCK_SIZE: tl.constexpr,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
-    DRAFT_LOGITS_USE_INDEX_MAPPING: tl.constexpr,
 ):
     logit_idx = tl.program_id(0).to(tl.int64)
     draft_step_idx = tl.load(expanded_local_pos_ptr + logit_idx)
@@ -484,7 +461,6 @@ def _compute_local_residual_mass_kernel(
         draft_logits_ptr,
         draft_logits_stride_0,
         draft_logits_stride_1,
-        draft_logits_index_mapping_ptr,
         draft_local_max_ptr,
         draft_local_max_stride,
         draft_local_sumexp_ptr,
@@ -492,7 +468,6 @@ def _compute_local_residual_mass_kernel(
         vocab_num_blocks,
         PADDED_VOCAB_NUM_BLOCKS,
         True,  # HAS_DRAFT_LOGITS
-        DRAFT_LOGITS_USE_INDEX_MAPPING,
     )
 
     # Compute the residual mass: max(p_i * M_b(x|x_{<i}) - M_s(x|x_{<i}), 0)
@@ -535,8 +510,6 @@ def _rejection_kernel(
     draft_logits_ptr,
     draft_logits_stride_0,
     draft_logits_stride_1,
-    # [max_num_reqs]
-    draft_logits_index_mapping_ptr,
     # [num_logits, num_blocks]
     draft_local_max_ptr,
     draft_local_max_stride,
@@ -565,7 +538,6 @@ def _rejection_kernel(
     HAS_DRAFT_LOGITS: tl.constexpr,
     SYNTHETIC_MODE: tl.constexpr,
     USE_BLOCK_VERIFICATION: tl.constexpr,
-    DRAFT_LOGITS_USE_INDEX_MAPPING: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_idx).to(tl.int64)
@@ -673,7 +645,6 @@ def _rejection_kernel(
                         draft_logits_ptr,
                         draft_logits_stride_0,
                         draft_logits_stride_1,
-                        draft_logits_index_mapping_ptr,
                         draft_local_max_ptr,
                         draft_local_max_stride,
                         draft_local_sumexp_ptr,
@@ -681,7 +652,6 @@ def _rejection_kernel(
                         vocab_num_blocks,
                         PADDED_VOCAB_NUM_BLOCKS,
                         HAS_DRAFT_LOGITS,
-                        DRAFT_LOGITS_USE_INDEX_MAPPING,
                     )
                 )
                 if SYNTHETIC_MODE:
@@ -740,8 +710,6 @@ def _resample_kernel(
     draft_logits_ptr,
     draft_logits_stride_0,
     draft_logits_stride_1,
-    # [max_num_reqs]
-    draft_logits_index_mapping_ptr,
     # [num_reqs]
     draft_rejected_logsumexp_ptr,
     # [num_reqs]
@@ -765,7 +733,6 @@ def _resample_kernel(
     HAS_DRAFT_LOGITS: tl.constexpr,
     USE_FP64: tl.constexpr,
     USE_BLOCK_VERIFICATION: tl.constexpr,
-    DRAFT_LOGITS_USE_INDEX_MAPPING: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     resample_idx = tl.load(rejected_step_ptr + req_idx)
@@ -803,16 +770,11 @@ def _resample_kernel(
         # directly use the target logits.
         residual_logits = target_logits
     elif HAS_DRAFT_LOGITS:
-        draft_logits_idx = req_state_idx
-        if DRAFT_LOGITS_USE_INDEX_MAPPING:
-            draft_logits_idx = tl.load(
-                draft_logits_index_mapping_ptr + req_state_idx
-            ).to(tl.int64)
         # draft_logits is stored pre-temperature, so apply scale first.
         draft_logits = (
             tl.load(
                 draft_logits_ptr
-                + draft_logits_idx * draft_logits_stride_0
+                + req_state_idx * draft_logits_stride_0
                 + resample_idx * draft_logits_stride_1
                 + block,
                 mask=mask,
@@ -878,7 +840,8 @@ def _resample_kernel(
         APPLY_TEMPERATURE=False,
         USE_FP64=USE_FP64,
     )
-    token_id = block_idx * BLOCK_SIZE + idx
+    # See gumbel.py: degenerate tiles must not emit ids >= vocab_size.
+    token_id = tl.minimum(block_idx * BLOCK_SIZE + idx, vocab_size - 1)
     tl.store(
         resampled_local_argmax_ptr
         + req_idx * resampled_local_argmax_stride
@@ -980,8 +943,6 @@ def rejection_sample(
     # [max_num_reqs]
     seed: torch.Tensor,
     num_speculative_steps: int,
-    # [max_num_reqs]
-    draft_logits_index_mapping: torch.Tensor | None = None,
     # [num_speculative_steps]
     synthetic_conditional_rates: torch.Tensor | None = None,
     use_fp64: bool = False,
@@ -1001,9 +962,6 @@ def rejection_sample(
         # In some cases (e.g. MiMo v2.5 Pro + DFlash) the target model's
         # vocab size is larger than the draft's due to padding.
         vocab_size = min(vocab_size, draft_logits.size(-1))
-    use_draft_logits_index_mapping = (
-        has_draft_logits and draft_logits_index_mapping is not None
-    )
 
     # Compute the per-vocab-block logits stats, such as target argmax
     # (for greedy requests), and target max + softmax exponential
@@ -1042,7 +1000,6 @@ def rejection_sample(
         draft_logits,
         draft_logits_stride_0,
         draft_logits_stride_1,
-        draft_logits_index_mapping,
         expanded_idx_mapping,
         expanded_local_pos,
         temperature,
@@ -1050,7 +1007,6 @@ def rejection_sample(
         num_speculative_steps,
         BLOCK_SIZE=VOCAB_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
-        DRAFT_LOGITS_USE_INDEX_MAPPING=use_draft_logits_index_mapping,
     )
 
     # Precompute the running joint ratio and residual mass for block
@@ -1076,7 +1032,6 @@ def rejection_sample(
             draft_logits,
             draft_logits_stride_0,
             draft_logits_stride_1,
-            draft_logits_index_mapping,
             draft_local_max,
             draft_local_max.stride(0),
             draft_local_sumexp,
@@ -1087,7 +1042,6 @@ def rejection_sample(
             vocab_num_blocks,
             PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
             HAS_DRAFT_LOGITS=has_draft_logits,
-            DRAFT_LOGITS_USE_INDEX_MAPPING=use_draft_logits_index_mapping,
             num_warps=1,
         )
 
@@ -1112,7 +1066,6 @@ def rejection_sample(
                 draft_logits,
                 draft_logits_stride_0,
                 draft_logits_stride_1,
-                draft_logits_index_mapping,
                 draft_local_max,
                 draft_local_max.stride(0),
                 draft_local_sumexp,
@@ -1126,7 +1079,6 @@ def rejection_sample(
                 vocab_num_blocks,
                 BLOCK_SIZE=VOCAB_BLOCK_SIZE,
                 PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
-                DRAFT_LOGITS_USE_INDEX_MAPPING=use_draft_logits_index_mapping,
             )
         else:
             local_residual_mass = None
@@ -1160,7 +1112,6 @@ def rejection_sample(
         draft_logits,
         draft_logits_stride_0,
         draft_logits_stride_1,
-        draft_logits_index_mapping,
         draft_local_max,
         draft_local_max.stride(0),
         draft_local_sumexp,
@@ -1179,7 +1130,6 @@ def rejection_sample(
         HAS_DRAFT_LOGITS=has_draft_logits,
         SYNTHETIC_MODE=synthetic_conditional_rates is not None,
         USE_BLOCK_VERIFICATION=use_block_verification,
-        DRAFT_LOGITS_USE_INDEX_MAPPING=use_draft_logits_index_mapping,
         num_warps=1,
     )
 
@@ -1206,7 +1156,6 @@ def rejection_sample(
         draft_logits,
         draft_logits_stride_0,
         draft_logits_stride_1,
-        draft_logits_index_mapping,
         draft_rejected_logsumexp,
         num_sampled,
         cu_num_logits,
@@ -1221,7 +1170,6 @@ def rejection_sample(
         HAS_DRAFT_LOGITS=has_draft_logits,
         USE_FP64=use_fp64,
         USE_BLOCK_VERIFICATION=use_block_verification,
-        DRAFT_LOGITS_USE_INDEX_MAPPING=use_draft_logits_index_mapping,
     )
 
     # Insert the resampled tokens into the output sampled.
