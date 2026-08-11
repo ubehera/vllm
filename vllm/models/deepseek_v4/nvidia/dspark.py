@@ -81,6 +81,22 @@ def _linear_output(output: torch.Tensor | tuple[torch.Tensor, object]) -> torch.
     return output
 
 
+def _reshape_o_proj_bmm_weight(
+    weight: torch.Tensor,
+    n_groups: int,
+    o_lora_rank: int,
+    hidden_size: int,
+) -> torch.Tensor | None:
+    expected_shape = (n_groups, o_lora_rank, hidden_size)
+    if weight.dim() == 2:
+        if weight.shape != (n_groups * o_lora_rank, hidden_size):
+            return None
+        return weight.view(expected_shape)
+    if weight.shape == expected_shape:
+        return weight
+    return None
+
+
 def _rmsnorm_no_weight(x: torch.Tensor, eps: float) -> torch.Tensor:
     x_float = x.float()
     return x_float.mul(torch.rsqrt(x_float.square().mean(-1, keepdim=True) + eps))
@@ -288,9 +304,14 @@ class DeepSeekV4DSparkLayer(nn.Module):
         n_groups = attn.n_local_groups
         o_lora_rank = attn.o_lora_rank
         hidden_size = attn.wo_a.weight.shape[-1]
-        if attn.wo_a.weight.shape[0] // o_lora_rank != n_groups:
+        wo_a_weight_3d = _reshape_o_proj_bmm_weight(
+            attn.wo_a.weight,
+            n_groups,
+            o_lora_rank,
+            hidden_size,
+        )
+        if wo_a_weight_3d is None:
             return None
-        wo_a_weight_3d = attn.wo_a.weight.view(n_groups, o_lora_rank, hidden_size)
         wo_a_scale = getattr(attn.wo_a, "weight_scale_inv", None)
         if wo_a_scale is None:
             wo_a_scale = attn.wo_a.weight_scale
