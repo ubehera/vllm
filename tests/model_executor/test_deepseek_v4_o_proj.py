@@ -108,3 +108,57 @@ def test_sm12x_o_proj_dispatches_postprocessed_bmm_layout(
     )
 
     assert called
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_sm12x_fused_o_proj_quant_emits_ue8m0_compatible_scales():
+    capability = torch.cuda.get_device_capability()
+    if capability[0] != 12:
+        pytest.skip(f"requires SM12x, found SM{capability[0]}{capability[1]}")
+
+    device = torch.device("cuda")
+    num_tokens, num_groups, hidden_size, out_rank = 17, 2, 128, 128
+    a = torch.randn(
+        (num_tokens, num_groups, hidden_size), device=device, dtype=torch.float32
+    ).clamp_(-2.0, 2.0).to(torch.float8_e4m3fn)
+    b = torch.randn(
+        (num_groups, out_rank, hidden_size), device=device, dtype=torch.float32
+    ).clamp_(-2.0, 2.0).to(torch.float8_e4m3fn)
+    a_scale = torch.ones(
+        (num_tokens, num_groups, hidden_size // 128),
+        device=device,
+        dtype=torch.float32,
+    )
+    b_scale = torch.ones(
+        (num_groups, out_rank // 128, hidden_size // 128),
+        device=device,
+        dtype=torch.float32,
+    )
+    out_fp8 = torch.empty(
+        (num_tokens, num_groups * out_rank),
+        device=device,
+        dtype=torch.float8_e4m3fn,
+    )
+    out_scale = torch.empty(
+        (num_tokens, num_groups * out_rank // 128),
+        device=device,
+        dtype=torch.float32,
+    )
+
+    fp8_einsum.deepseek_v4_sm12x_fp8_einsum_quant(
+        a,
+        a_scale,
+        b,
+        b_scale,
+        out_fp8,
+        out_scale,
+        use_ue8m0=True,
+    )
+    torch.cuda.synchronize()
+
+    assert torch.isfinite(out_scale).all()
+    assert (out_scale > 0).all()
+    scale_bits = out_scale.view(torch.int32).to(torch.int64) & 0xFFFFFFFF
+    assert ((scale_bits & 0x807FFFFF) == 0).all(), (
+        "DeepGEMM UE8M0 input scales must have zero sign and mantissa bits"
+    )

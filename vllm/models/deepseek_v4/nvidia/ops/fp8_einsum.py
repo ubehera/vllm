@@ -162,6 +162,7 @@ def _deepseek_v4_sm12x_fp8_einsum_quant_kernel(
     out_scale_stride_block: tl.constexpr,
     blocks_per_group: tl.constexpr,
     fp8_max: tl.constexpr,
+    use_ue8m0: tl.constexpr,
     eps: tl.constexpr,
     BLOCK_TOKENS: tl.constexpr,
     BLOCK_OUT: tl.constexpr,
@@ -232,7 +233,10 @@ def _deepseek_v4_sm12x_fp8_einsum_quant_kernel(
         accum += raw * a_scale[:, None] * b_scale[None, :]
 
     row_absmax = tl.maximum(tl.max(tl.abs(accum), axis=1), eps)
-    scale = row_absmax * (1.0 / fp8_max)
+    scale_raw = row_absmax * (1.0 / fp8_max)
+    scale = (
+        tl.math.exp2(tl.ceil(tl.log2(scale_raw))) if use_ue8m0 else scale_raw
+    )
     quant = tl.clamp(accum / scale[:, None], -fp8_max, fp8_max).to(tl.float8e4nv)
 
     k_block = group * blocks_per_group + out_block
@@ -259,14 +263,16 @@ def deepseek_v4_sm12x_fp8_einsum_quant(
     b_scale: torch.Tensor,
     out_fp8: torch.Tensor,
     out_scale: torch.Tensor,
+    *,
+    use_ue8m0: bool,
 ) -> None:
     """``bhr,hdr->bhd`` fused with FP8 block quantization of the result.
 
     ``out_fp8`` / ``out_scale`` are the flattened ``(tokens, groups*out_rank)``
     / ``(tokens, groups*out_rank // 128)`` views ready to pass directly as
-    ``A``/``As`` to ``w8a8_triton_block_scaled_mm``, skipping the separate
-    BF16-output-then-requantize step that ``deepseek_v4_sm12x_fp8_einsum``
-    plus a downstream ``per_token_group_quant_fp8`` call would otherwise need.
+    ``A``/``As`` to the downstream block-scaled MM. When that consumer is the
+    DeepGEMM UE8M0 path, emit power-of-two FP32 scales so its on-entry packer
+    cannot reject non-zero sign or mantissa bits.
     """
     num_tokens, num_groups, hidden_size = a.shape
     b_groups, out_rank, b_hidden_size = b.shape
@@ -329,6 +335,7 @@ def deepseek_v4_sm12x_fp8_einsum_quant(
         out_scale.stride(1),
         blocks_per_group=blocks_per_group,
         fp8_max=fp8_max,
+        use_ue8m0=use_ue8m0,
         eps=1e-10,
         BLOCK_TOKENS=block_tokens,
         BLOCK_OUT=block_out,
