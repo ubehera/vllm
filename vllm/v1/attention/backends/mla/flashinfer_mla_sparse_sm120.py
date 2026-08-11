@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """SM120 implementation variant for ``FLASHINFER_MLA_SPARSE_SM120``."""
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import torch
 
@@ -120,20 +120,20 @@ class FlashInferMLASparseSM120Impl(MLAAttentionImpl[FlashInferMLASparseMetadata]
         assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
 
-        # Request per-token valid counts (non-(-1) top-k entries) in the same
-        # kernel pass at no extra cost, and pass them as seq_lens so the
-        # trtllm-gen sparse kernel reads only each request's valid prefix and
-        # skips -1 padding when its context < topk_tokens. Matches the sibling
-        # flashinfer_mla_sparse backend (and upstream PR #47527). Bit-identical
-        # to seq_lens=None whenever every row is fully populated (context >=
-        # topk_tokens), which covers the long-context path.
-        topk_indices_physical, seq_lens = triton_convert_req_index_to_global_index(
-            attn_metadata.req_id_per_token[:num_actual_toks],
-            attn_metadata.block_table,
-            topk_indices,
-            BLOCK_SIZE=attn_metadata.block_size,
-            NUM_TOPK_TOKENS=topk_indices.shape[1],
-            return_valid_counts=True,
+        # Keep the exact SM120 kernel contract proven by the TP4 1M-context
+        # control. Passing a per-row seq_lens tensor is numerically equivalent
+        # once every row has topk_tokens entries, but the current FlashInfer
+        # build misses the 30-minute gate with that path. The kernel already
+        # masks -1 padding for short contexts when seq_lens is omitted.
+        topk_indices_physical = cast(
+            torch.Tensor,
+            triton_convert_req_index_to_global_index(
+                attn_metadata.req_id_per_token[:num_actual_toks],
+                attn_metadata.block_table,
+                topk_indices,
+                BLOCK_SIZE=attn_metadata.block_size,
+                NUM_TOPK_TOKENS=topk_indices.shape[1],
+            ),
         )
 
         output = q.new_empty(
@@ -173,7 +173,7 @@ class FlashInferMLASparseSM120Impl(MLAAttentionImpl[FlashInferMLASparseMetadata]
                 kv_lora_rank=self.kv_lora_rank,
                 qk_rope_head_dim=self.qk_rope_head_dim,
                 block_tables=_bt[_lo:_hi],
-                seq_lens=seq_lens[_lo:_hi],
+                seq_lens=None,
                 max_seq_len=attn_metadata.topk_tokens,
                 out=_out[_lo:_hi],
                 bmm1_scale=self.scale,
