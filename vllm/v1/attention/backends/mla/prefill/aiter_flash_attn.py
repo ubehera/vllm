@@ -17,9 +17,6 @@ from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.model_executor.layers.attention.mla_attention import (
-        MLACommonPrefillMetadata,
-    )
     from vllm.platforms.interface import DeviceCapability
 
 
@@ -102,24 +99,22 @@ class AiterFlashAttnPrefillBackend(MLAPrefillBackend):
 
     def run_prefill_context_chunk(
         self,
-        chunk: "MLACommonPrefillMetadata.ContextChunk",
+        chunk_idx: int,
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
         out: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        assert out is None, (
-            "AiterFlashAttnPrefillBackend does not report supports_out(), so it "
-            "is never given a context-chunk `out` to write into."
-        )
+        assert self._prefill_metadata.chunked_context is not None
+        chunked = self._prefill_metadata.chunked_context
         out, lse = self.flash_attn_varlen_func(
             q=q,
             k=k,
             v=v,
-            cu_seqlens_q=chunk.query_start_loc,
-            cu_seqlens_k=chunk.cu_seq_lens,
-            max_seqlen_q=chunk.max_query_len,
-            max_seqlen_k=chunk.max_seq_len,
+            cu_seqlens_q=self._prefill_metadata.query_start_loc,
+            cu_seqlens_k=chunked.cu_seq_lens[chunk_idx],
+            max_seqlen_q=self._prefill_metadata.max_query_len,
+            max_seqlen_k=chunked.max_seq_lens[chunk_idx],
             softmax_scale=self.scale,
             causal=False,
             return_lse=True,
