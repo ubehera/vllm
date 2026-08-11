@@ -278,6 +278,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         )
         self.wo_a.is_bmm = True
         self.wo_a.bmm_batch_size = self.n_local_groups
+        self.wo_a.preserve_bmm_scale_layout_on_sm12x = True
         self.wo_b = RowParallelLinear(
             self.n_groups * self.o_lora_rank,
             self.hidden_size,

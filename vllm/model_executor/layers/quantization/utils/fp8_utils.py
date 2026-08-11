@@ -1135,6 +1135,7 @@ def deepgemm_post_process_fp8_weight_block(
     use_e8m0: bool,
     is_bmm: bool = False,
     bmm_batch_size: int = 0,
+    preserve_bmm_scale_layout: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert wq.dtype == torch.float8_e4m3fn, (
         "Expected quantized tensor dtype "
@@ -1164,6 +1165,8 @@ def deepgemm_post_process_fp8_weight_block(
         r = wq.size(0) // g
         wq = wq.view(g, r, d)
         ws = ws.view(g, r // quant_block_shape[0], d // quant_block_shape[1])
+        if preserve_bmm_scale_layout:
+            return wq, ws.contiguous()
         dg_ws = deepgemm_post_process_weight_scale_block(
             ws=ws,
             mn=r,

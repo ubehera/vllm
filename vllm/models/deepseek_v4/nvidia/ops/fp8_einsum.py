@@ -445,16 +445,25 @@ def deepseek_v4_fp8_einsum(
     equation: str,
     recipe: list[int],
 ) -> None:
-    if equation == "bhr,hdr->bhd" and b.dim() == 2:
+    if equation == "bhr,hdr->bhd" and b.dim() in (2, 3):
         num_groups = out.shape[1]
         out_rank = out.shape[2]
         hidden_size = a.shape[2]
-        if b.shape[0] % out_rank != 0:
-            raise RuntimeError(
-                "DeepSeek V4 fp8 einsum weight rows must be divisible by "
-                f"out_rank={out_rank}, got {b.shape[0]}"
-            )
-        b_groups = b.shape[0] // out_rank
+        if b.dim() == 2:
+            if b.shape[0] % out_rank != 0:
+                raise RuntimeError(
+                    "DeepSeek V4 fp8 einsum weight rows must be divisible by "
+                    f"out_rank={out_rank}, got {b.shape[0]}"
+                )
+            b_groups = b.shape[0] // out_rank
+            b = b.view(b_groups, out_rank, hidden_size)
+        else:
+            b_groups = b.shape[0]
+            if b.shape[1:] != (out_rank, hidden_size):
+                raise RuntimeError(
+                    "DeepSeek V4 fp8 einsum weight must have shape "
+                    f"(*, {out_rank}, {hidden_size}), got {tuple(b.shape)}"
+                )
         group_start = 0
         if b_groups != num_groups:
             if b_groups % num_groups != 0:
@@ -468,7 +477,6 @@ def deepseek_v4_fp8_einsum(
             group_start = (
                 get_tensor_model_parallel_rank() % group_partitions
             ) * num_groups
-        b = b.view(b_groups, out_rank, hidden_size)
         if group_start != 0 or b_groups != num_groups:
             b = b.narrow(0, group_start, num_groups)
 

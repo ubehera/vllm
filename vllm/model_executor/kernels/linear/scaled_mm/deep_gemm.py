@@ -87,6 +87,12 @@ class DeepGemmFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         assert layer.weight_block_size is not None
 
         if self.is_deep_gemm_supported:
+            capability = current_platform.get_device_capability()
+            preserve_bmm_scale_layout = (
+                getattr(layer, "preserve_bmm_scale_layout_on_sm12x", False)
+                and capability is not None
+                and capability.major == 12
+            )
             weight_scale_invs = params.weight_scale_inv
             scale_attr = (
                 params.WEIGHT_SCALE_INV
@@ -102,6 +108,7 @@ class DeepGemmFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 use_e8m0=self.use_deep_gemm_e8m0,
                 is_bmm=getattr(layer, "is_bmm", False),
                 bmm_batch_size=getattr(layer, "bmm_batch_size", 0),
+                preserve_bmm_scale_layout=preserve_bmm_scale_layout,
             )
             replace_parameter(layer, params.WEIGHT, dg_weight)
             replace_parameter(layer, scale_attr, dg_weight_scale)

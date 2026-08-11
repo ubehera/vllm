@@ -2,7 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
+import torch
 
+from vllm.model_executor.layers.quantization.utils import fp8_utils
+from vllm.models.deepseek_v4.nvidia.ops import fp8_einsum
 from vllm.models.deepseek_v4.nvidia.ops.o_proj import compute_fp8_einsum_recipe
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
@@ -30,3 +33,78 @@ def test_deepseek_v4_o_proj_recipe_is_arch_specific(
     )
 
     assert compute_fp8_einsum_recipe() == (expected_recipe, expected_tma_aligned)
+
+
+def test_sm12x_bmm_weight_keeps_logical_scale_layout(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    def fail_transform(*args, **kwargs):
+        raise AssertionError("SM12x Triton BMM scales must not be DeepGEMM-packed")
+
+    monkeypatch.setattr(
+        fp8_utils,
+        "transform_sf_into_required_layout",
+        fail_transform,
+    )
+    weight = torch.empty((256, 128), dtype=torch.float8_e4m3fn)
+    scale = torch.ones((2, 1), dtype=torch.float32)
+
+    processed_weight, processed_scale = (
+        fp8_utils.deepgemm_post_process_fp8_weight_block(
+            weight,
+            scale,
+            (128, 128),
+            use_e8m0=False,
+            is_bmm=True,
+            bmm_batch_size=2,
+            preserve_bmm_scale_layout=True,
+        )
+    )
+
+    assert processed_weight.shape == (2, 128, 128)
+    assert processed_scale.shape == (2, 1, 1)
+    torch.testing.assert_close(processed_scale, scale.view(2, 1, 1))
+
+
+def test_sm12x_o_proj_dispatches_postprocessed_bmm_layout(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        current_platform,
+        "get_device_capability",
+        lambda device_id=0: DeviceCapability(12, 1),
+    )
+    called = False
+
+    def fake_sm12x_einsum(a, a_scale, b, b_scale, out):
+        nonlocal called
+        called = True
+        assert b.shape == (2, 128, 128)
+        assert b_scale.shape == (2, 1, 1)
+
+    def fail_deep_gemm(*args, **kwargs):
+        raise AssertionError("postprocessed SM12x BMM must use the Triton fallback")
+
+    monkeypatch.setattr(
+        fp8_einsum,
+        "deepseek_v4_sm12x_fp8_einsum",
+        fake_sm12x_einsum,
+    )
+    monkeypatch.setattr(fp8_einsum, "fp8_einsum", fail_deep_gemm)
+    a = torch.empty((1, 2, 128), dtype=torch.float8_e4m3fn)
+    a_scale = torch.ones((1, 2, 1), dtype=torch.float32)
+    b = torch.empty((2, 128, 128), dtype=torch.float8_e4m3fn)
+    b_scale = torch.ones((2, 1, 1), dtype=torch.float32)
+    out = torch.empty((1, 2, 128), dtype=torch.bfloat16)
+
+    fp8_einsum.deepseek_v4_fp8_einsum(
+        a,
+        a_scale,
+        b,
+        b_scale,
+        out,
+        "bhr,hdr->bhd",
+        [1, 128, 128],
+    )
+
+    assert called
