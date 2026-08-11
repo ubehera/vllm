@@ -354,6 +354,7 @@ class DeepSeekV4DSparkLayer(nn.Module):
             wo_a_scale,
             z_fp8,
             z_scale,
+            use_ue8m0=bool(getattr(kernel, "use_deep_gemm_e8m0", False)),
         )
         output = kernel.apply_block_scaled_mm(
             A=z_fp8,
