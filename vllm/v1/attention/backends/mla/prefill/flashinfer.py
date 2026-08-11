@@ -150,7 +150,8 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
         if has_context:
             chunked_context = prefill_metadata.chunked_context
             assert chunked_context is not None
-            self._ensure_chunks(len(chunked_context.chunks), self._workspace_buffer)
+            num_chunks = chunked_context.cu_seq_lens.shape[0]
+            self._ensure_chunks(num_chunks, self._workspace_buffer)
 
         num_qo_heads = self.num_heads
         num_kv_heads = num_qo_heads
@@ -178,10 +179,12 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
         if has_context:
             chunked_context = prefill_metadata.chunked_context
             assert chunked_context is not None
-            for chunk in chunked_context.chunks:
-                self._prefill_chunks[chunk.index].plan(
-                    qo_indptr=chunk.query_start_loc,
-                    kv_indptr=chunk.cu_seq_lens,
+            for i in range(num_chunks):
+                kv_indptr_chunk = chunked_context.cu_seq_lens[i]
+
+                self._prefill_chunks[i].plan(
+                    qo_indptr=qo_indptr,
+                    kv_indptr=kv_indptr_chunk,
                     num_qo_heads=num_qo_heads,
                     num_kv_heads=num_kv_heads,
                     head_dim_qk=head_dim_qk,
@@ -224,12 +227,12 @@ class FlashInferPrefillBackend(MLAPrefillBackend):
 
     def run_prefill_context_chunk(
         self,
-        chunk: "MLACommonPrefillMetadata.ContextChunk",
+        chunk_idx: int,
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        attn_out, lse = self._prefill_chunks[chunk.index].run(
+        attn_out, lse = self._prefill_chunks[chunk_idx].run(
             q=q,
             k=k,
             v=v,
