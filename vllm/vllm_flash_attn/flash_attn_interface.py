@@ -141,6 +141,8 @@ def get_scheduler_metadata(
     pack_gqa=None,  # Can be tuned for speed
     sm_margin=0,  # Can be tuned if some SMs are used for communication
 ):
+    if not FA3_AVAILABLE:
+        raise ImportError(f"FlashAttention 3 is unavailable: {FA3_UNAVAILABLE_REASON}")
     cache_seqlens = maybe_contiguous(cache_seqlens)
     if headdim_v is None:
         headdim_v = headdim
@@ -267,6 +269,11 @@ def flash_attn_varlen_func(
             logsumexp of each row of the matrix QK^T * scaling (e.g., log of the softmax
             normalization factor).
     """
+    if not is_fa_version_supported(fa_version):
+        raise ImportError(
+            f"FlashAttention {fa_version} is unavailable: "
+            f"{fa_version_unsupported_reason(fa_version)}"
+        )
     assert cu_seqlens_k is not None or seqused_k is not None, (
         "cu_seqlens_k or seqused_k must be provided"
     )

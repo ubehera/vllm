@@ -24,3 +24,15 @@ def test_bundled_flash_attention_can_be_omitted() -> None:
 
     assert 'os.getenv("VLLM_BUILD_FLASH_ATTN", "1")' in setup
     assert "if should_build_flash_attn():" in setup
+
+
+def test_flash_attention_package_is_importable_without_native_extensions() -> None:
+    package = (ROOT / "vllm/vllm_flash_attn/__init__.py").read_text()
+
+    assert "if not (FA2_AVAILABLE or FA3_AVAILABLE):" not in package
+    for availability_flag in (
+        "FA2_AVAILABLE",
+        "FA3_AVAILABLE",
+        "FA4_AVAILABLE",
+    ):
+        assert f'"{availability_flag}"' in package
