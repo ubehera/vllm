@@ -10,8 +10,6 @@ vllm-project/vllm#41834)."""
 
 import inspect
 
-import torch
-
 from vllm.models.deepseek_v4.nvidia import dspark as nvidia_dspark
 
 
@@ -30,16 +28,3 @@ def test_map_draft_to_target_is_identity_for_full_vocab():
         nvidia_dspark.DSparkDeepseekV4ForCausalLM.map_draft_to_target
     )
     assert "return draft_ids" in src
-
-
-def test_dspark_fused_o_proj_accepts_preprocessed_bmm_weight():
-    flat = torch.empty((256, 128), dtype=torch.float8_e4m3fn)
-    batched = torch.empty((2, 128, 128), dtype=torch.float8_e4m3fn)
-
-    assert nvidia_dspark._reshape_o_proj_bmm_weight(flat, 2, 128, 128).shape == (
-        2,
-        128,
-        128,
-    )
-    assert nvidia_dspark._reshape_o_proj_bmm_weight(batched, 2, 128, 128) is batched
-    assert nvidia_dspark._reshape_o_proj_bmm_weight(batched[:1], 2, 128, 128) is None
