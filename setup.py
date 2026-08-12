@@ -59,6 +59,11 @@ def should_require_rust_frontend() -> bool:
     return value.lower() not in ("", "0", "false", "no")
 
 
+def should_build_flash_attn() -> bool:
+    value = os.getenv("VLLM_BUILD_FLASH_ATTN", "1")
+    return value.lower() not in ("0", "false", "no")
+
+
 def get_precompiled_rust_extension_paths() -> list[Path]:
     return sorted((ROOT_DIR / "vllm").glob("_rust_*.so"))
 
@@ -1130,17 +1135,20 @@ if _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._rocm_C"))
 
 if _is_cuda():
-    ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa2_C"))
-    if USE_PRECOMPILED_EXTENSIONS or (
-        CUDA_HOME and get_nvcc_cuda_version() >= Version("12.3")
-    ):
-        # FA3 requires CUDA 12.3 or later
-        ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa3_C"))
-    # FA4 CuteDSL - Python-only component for FA4's cute DSL support
-    # Optional since this doesn't produce a .so file, just copies Python files
-    ext_modules.append(
-        CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa4_cutedsl_C", optional=True)
-    )
+    if should_build_flash_attn():
+        ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa2_C"))
+        if USE_PRECOMPILED_EXTENSIONS or (
+            CUDA_HOME and get_nvcc_cuda_version() >= Version("12.3")
+        ):
+            # FA3 requires CUDA 12.3 or later
+            ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa3_C"))
+        # FA4 CuteDSL - Python-only component for FA4's cute DSL support
+        # Optional since this doesn't produce a .so file, just copies Python files
+        ext_modules.append(
+            CMakeExtension(
+                name="vllm.vllm_flash_attn._vllm_fa4_cutedsl_C", optional=True
+            )
+        )
     if USE_PRECOMPILED_EXTENSIONS or (
         CUDA_HOME and get_nvcc_cuda_version() >= Version("12.9")
     ):
