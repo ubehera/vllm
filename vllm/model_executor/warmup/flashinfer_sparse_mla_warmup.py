@@ -32,11 +32,21 @@ _DEEPSEEK_V4_SPARSE_MLA_BACKENDS = frozenset(
     }
 )
 _FLASHINFER_MLA_SPARSE_BACKENDS = frozenset({"FLASHINFER_MLA_SPARSE_SM120"})
-_DEEPSEEK_V4_FLASHINFER_MLA_SPARSE_BACKENDS = frozenset({"FLASHINFER_MLA_SPARSE_DSV4"})
+_DEEPSEEK_V4_FLASHINFER_MLA_SPARSE_BACKENDS = frozenset(
+    {
+        "FLASHINFER_MLA_SPARSE_DSV4",
+        # On SM12x, the DeepSeek wrapper retains this enclosing backend name
+        # while delegating decode to FlashInfer's packed DSv4 kernel. Without
+        # recognizing the wrapper, warmup runs the kernel outside the
+        # autotune context and production falls back to the slow heuristic.
+        "DEEPSEEK_SPARSE_SWA",
+    }
+)
 
 _FLASHINFER_SM120_SPARSE_MLA_DECODE_LABELS = {
     "FLASHINFER_MLA_SPARSE_SM120": "DSv3.2",
     "FLASHINFER_MLA_SPARSE_DSV4": "DSv4",
+    "DEEPSEEK_SPARSE_SWA": "DSv4",
 }
 
 _SPARSE_MLA_MIXED_WARMUP_TOKENS = 16
