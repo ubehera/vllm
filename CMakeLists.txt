@@ -31,6 +31,8 @@ endif()
 
 # CUDA by default, can be overridden by using -DVLLM_TARGET_DEVICE=... (used by setup.py)
 set(VLLM_TARGET_DEVICE "cuda" CACHE STRING "Target device backend for vLLM")
+option(VLLM_BUILD_GB10_ONLY
+  "Build only kernels used by the GB10 serving profile" OFF)
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "Target device: ${VLLM_TARGET_DEVICE}")
 
@@ -236,6 +238,17 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       "with no usable kernels. Detected gencode flags: ${CUDA_ARCH_FLAGS}; "
       "supported: ${CUDA_SUPPORTED_ARCHS}. "
       "Set TORCH_CUDA_ARCH_LIST for your GPU (e.g. 12.0).")
+  endif()
+  if(VLLM_BUILD_GB10_ONLY)
+    foreach(CUDA_ARCH IN LISTS CUDA_ARCHS)
+      if(NOT CUDA_ARCH MATCHES "^12[.](0|1)")
+        message(FATAL_ERROR
+          "VLLM_BUILD_GB10_ONLY requires an SM12x-only CUDA architecture "
+          "list, found: ${CUDA_ARCHS}")
+      endif()
+    endforeach()
+    message(STATUS
+      "GB10-only build: omitting fallback kernels for pre-SM12x devices")
   endif()
 else()
   #
@@ -625,7 +638,12 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       cuda_archs_loose_intersection(MARLIN_FP8_ARCHS "8.9;12.0a;12.1a" "${CUDA_ARCHS}")
     endif()
     # marlin arches for other files
-    cuda_archs_loose_intersection(MARLIN_OTHER_ARCHS "7.5;8.0+PTX" "${CUDA_ARCHS}")
+    if(VLLM_BUILD_GB10_ONLY)
+      set(MARLIN_OTHER_ARCHS "")
+    else()
+      cuda_archs_loose_intersection(MARLIN_OTHER_ARCHS
+        "7.5;8.0+PTX" "${CUDA_ARCHS}")
+    endif()
 
     if (MARLIN_OTHER_ARCHS)
 
@@ -892,6 +910,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   # (Build 8.9 for FP8)
   cuda_archs_loose_intersection(SCALED_MM_2X_ARCHS
     "7.5;8.0;8.7;8.9+PTX" "${CUDA_ARCHS}")
+  if(VLLM_BUILD_GB10_ONLY)
+    set(SCALED_MM_2X_ARCHS "")
+  endif()
   # subtract out the archs that are already built for 3x
   list(REMOVE_ITEM SCALED_MM_2X_ARCHS ${SCALED_MM_3X_ARCHS})
   if (SCALED_MM_2X_ARCHS)
@@ -1147,6 +1168,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 
   # Hadacore kernels
   cuda_archs_loose_intersection(HADACORE_ARCHS "8.0+PTX;9.0+PTX" "${CUDA_ARCHS}")
+  if(VLLM_BUILD_GB10_ONLY)
+    set(HADACORE_ARCHS "")
+  endif()
   if(HADACORE_ARCHS)
     set(HADACORE_SRCS "csrc/libtorch_stable/quantization/hadamard/hadacore/hadamard_transform_cuda.cu")
     set_gencode_flags_for_srcs(
@@ -1278,7 +1302,12 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     cuda_archs_loose_intersection(MARLIN_MOE_FP8_ARCHS "8.9;12.0a;12.1a" "${CUDA_ARCHS}")
   endif()
   # moe marlin arches for other files
-  cuda_archs_loose_intersection(MARLIN_MOE_OTHER_ARCHS "7.5;8.0+PTX" "${CUDA_ARCHS}")
+  if(VLLM_BUILD_GB10_ONLY)
+    set(MARLIN_MOE_OTHER_ARCHS "")
+  else()
+    cuda_archs_loose_intersection(MARLIN_MOE_OTHER_ARCHS
+      "7.5;8.0+PTX" "${CUDA_ARCHS}")
+  endif()
   if (MARLIN_MOE_OTHER_ARCHS)
 
     #
