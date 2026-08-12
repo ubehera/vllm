@@ -9,17 +9,13 @@ PR3395, merged in flashinfer >= 0.6.13). That kernel scales better at high
 concurrency in the MTP speculative-verify (multi-query) decode shape than the
 FlashMLA decode kernel, which is the root cause of the C8-C64 ctx0 decode gap.
 
-Implementation note: flashinfer main exposes this kernel through the
-``trtllm_batch_decode_sparse_mla_dsv4`` wrapper, but that wrapper re-validates
-inputs and -- critically -- carves the split-K ``mid_out``/``mid_lse`` scratch
-from a fixed workspace only for ``num_tokens <= 64``, falling back to a fresh
-``torch.empty`` of hundreds of MB on every decode step above that. The MTP
-multi-query decode shape routinely exceeds 64 tokens (C32/C64), so that per-step
-allocation dominates and makes the wrapper materially slower than the FlashMLA
-path. We instead drive the same kernel through its low-level
-``_SparseMLAPagedAttentionRunner``, constructed once and fed graph-stable scratch
-from vLLM's workspace manager -- so the scratch is reserved during warmup and
-reused, never reallocated per step.
+Implementation note: flashinfer's public ``sparse_mla_sm120_decode_dsv4``
+dispatcher selects the autotuned per-shape tactic, but requires the caller to
+provide split-K ``mid_out``/``mid_lse`` and final ``out_lse`` scratch. Decode
+feeds that public dispatcher graph-stable scratch from vLLM's workspace manager,
+so tuning is honored without allocating hundreds of MB on every step. Packed
+prefill continues through FlashInfer's reusable low-level runner because the
+public DSv4 dispatcher is decode-only.
 
 Gated behind ``VLLM_DEEPSEEK_V4_FLASHINFER_SM120_DECODE``; selected only on SM12x
 when the official packed kernel is importable (see ``_select_dsv4_attn_cls``).
@@ -77,13 +73,14 @@ def _get_decode_scratch(
     head_dim: int,
     topk: int,
     extra_topk: int = 0,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     num_splits = _decode_num_splits(topk, extra_topk)
-    mid_out, mid_lse = current_workspace_manager().get_simultaneous(
+    mid_out, mid_lse, out_lse = current_workspace_manager().get_simultaneous(
         ((num_tokens, num_heads, num_splits, head_dim), torch.bfloat16),
         ((num_tokens, num_heads, num_splits), torch.float32),
+        ((num_tokens, num_heads), torch.float32),
     )
-    return mid_out, mid_lse
+    return mid_out, mid_lse, out_lse
 
 
 def _as_sparse_sm120_cache(kv_cache: torch.Tensor) -> torch.Tensor:
@@ -139,13 +136,17 @@ class DeepseekV4FlashInferSM120DecodeAttention(DeepseekV4FlashMLAAttention):
                 "flashinfer >= 0.6.13)."
             )
 
-        from flashinfer.mla._sparse_mla_sm120 import _SparseMLAPagedAttentionRunner
+        from flashinfer.mla._sparse_mla_sm120 import (
+            _SparseMLAPagedAttentionRunner,
+            sparse_mla_sm120_decode_dsv4,
+        )
 
         max_tokens = get_current_vllm_config().scheduler_config.max_num_batched_tokens
         runner_device = torch.device("cuda", torch.accelerator.current_device_index())
-        # Construct the low-level runner once: its only per-instance state is a
-        # pre-sized LSE buffer. We feed it graph-stable mid_out/mid_lse scratch
-        # explicitly on every call, so it never allocates per step.
+        # Decode must use the public dispatcher so FlashInfer's resolved
+        # per-shape autotune tactics are honored. Keep the private runner only
+        # for packed prefill, which has no equivalent public dispatcher.
+        self._sm120_decode_dsv4 = sparse_mla_sm120_decode_dsv4
         self._sm120_runner = _SparseMLAPagedAttentionRunner(
             max_num_tokens=max_tokens,
             max_num_heads=self.padded_heads,
@@ -155,7 +156,8 @@ class DeepseekV4FlashInferSM120DecodeAttention(DeepseekV4FlashMLAAttention):
         )
         logger.info_once(
             "DeepSeek V4: using official FlashInfer SM120 packed sparse-MLA decode "
-            "via the low-level runner (VLLM_DEEPSEEK_V4_FLASHINFER_SM120_DECODE=1)."
+            "via the public autotuned dispatcher with vLLM-managed scratch "
+            "(VLLM_DEEPSEEK_V4_FLASHINFER_SM120_DECODE=1)."
         )
 
     def _reserve_sm120_decode_workspace(self) -> None:
@@ -262,7 +264,7 @@ class DeepseekV4FlashInferSM120DecodeAttention(DeepseekV4FlashMLAAttention):
         assert swa_lens is not None
 
         extra_topk = topk_indices.shape[-1] if topk_indices is not None else 0
-        mid_out, mid_lse = _get_decode_scratch(
+        mid_out, mid_lse, out_lse = _get_decode_scratch(
             num_decode_tokens,
             output.shape[1],
             output.shape[-1],
@@ -270,28 +272,28 @@ class DeepseekV4FlashInferSM120DecodeAttention(DeepseekV4FlashMLAAttention):
             extra_topk,
         )
 
-        # Each decode token is a one-token query: [num_decode_tokens, 1, h, d];
-        # the runner squeezes the singleton s_q dim internally.
-        q = self._prepare_sm120_query(q, output).unsqueeze(1)
+        # The public tuned dispatcher consumes [num_decode_tokens, h, d].
+        q = self._prepare_sm120_query(q, output)
         swa_cache = _as_sparse_sm120_cache(self.swa_cache_layer.kv_cache)
         extra_cache = (
             _as_sparse_sm120_cache(kv_cache)
             if (kv_cache is not None and not swa_only)
             else None
         )
-        self._sm120_runner.run(
+        self._sm120_decode_dsv4(
             q,
             swa_cache,
             swa_indices,
+            mid_out,
+            mid_lse,
             output,
+            out_lse,
             self.scale,
             topk_length=swa_lens,
             attn_sink=self.attn_sink,
             extra_kv_cache=extra_cache,
             extra_indices=topk_indices,
             extra_topk_length=topk_lens,
-            mid_out=mid_out,
-            mid_lse=mid_lse,
         )
 
     def _forward_prefill(
@@ -469,9 +471,10 @@ class DeepseekV4FlashInferSM120DecodeAttention(DeepseekV4FlashMLAAttention):
         )
         mid_out = None
         mid_lse = None
+        out_lse = None
         if num_prefill_tokens <= _DECODE_MAX_TOKENS:
             extra_topk = topk_indices.shape[-1] if topk_indices is not None else 0
-            mid_out, mid_lse = _get_decode_scratch(
+            mid_out, mid_lse, out_lse = _get_decode_scratch(
                 num_prefill_tokens,
                 output.shape[1],
                 output.shape[-1],
@@ -489,6 +492,7 @@ class DeepseekV4FlashInferSM120DecodeAttention(DeepseekV4FlashMLAAttention):
             extra_kv_cache=extra_cache,
             extra_indices=topk_indices,
             extra_topk_length=topk_lens,
+            out_lse=out_lse,
             mid_out=mid_out,
             mid_lse=mid_lse,
         )
