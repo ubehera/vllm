@@ -349,6 +349,19 @@ void fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
     torch::stable::Tensor const& q_fp8_scale_inv, double eps,
     int64_t cache_block_size);
 
+void fused_deepseek_v4_kv_rope_full_cache_bf16_insert(
+    torch::stable::Tensor const& kv, torch::stable::Tensor& k_cache,
+    torch::stable::Tensor const& slot_mapping,
+    torch::stable::Tensor const& position_ids,
+    torch::stable::Tensor const& cos_sin_cache, int64_t cache_block_size);
+
+void fused_deepseek_v4_kv_rope_full_cache_fp8_insert(
+    torch::stable::Tensor const& kv, torch::stable::Tensor& k_cache,
+    torch::stable::Tensor const& slot_mapping,
+    torch::stable::Tensor const& position_ids,
+    torch::stable::Tensor const& cos_sin_cache,
+    torch::stable::Tensor const& fp8_scale, int64_t cache_block_size);
+
 #ifndef USE_ROCM
 std::tuple<torch::stable::Tensor, torch::stable::Tensor>
 minimax_allreduce_rms_qk(torch::stable::Tensor qkv,

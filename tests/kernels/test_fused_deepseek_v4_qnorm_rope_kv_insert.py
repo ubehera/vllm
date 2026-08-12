@@ -144,6 +144,14 @@ def _full_cache_bf16_op_available() -> bool:
     )
 
 
+def _kv_only_full_cache_fp8_op_available() -> bool:
+    return hasattr(torch.ops._C, "fused_deepseek_v4_kv_rope_full_cache_fp8_insert")
+
+
+def _kv_only_full_cache_bf16_op_available() -> bool:
+    return hasattr(torch.ops._C, "fused_deepseek_v4_kv_rope_full_cache_bf16_insert")
+
+
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available() or not _op_available(),
     reason="CUDA not available or fused DeepseekV4 op not built in",
@@ -687,6 +695,44 @@ def _call_full_cache_bf16_fused(
     )
 
 
+def _call_kv_only_full_cache_fp8_fused(
+    kv,
+    k_cache,
+    slot_mapping,
+    positions,
+    cos_sin_cache,
+    fp8_scale,
+    bs,
+):
+    torch.ops._C.fused_deepseek_v4_kv_rope_full_cache_fp8_insert(
+        kv,
+        k_cache,
+        slot_mapping,
+        positions.long(),
+        cos_sin_cache,
+        fp8_scale,
+        bs,
+    )
+
+
+def _call_kv_only_full_cache_bf16_fused(
+    kv,
+    k_cache,
+    slot_mapping,
+    positions,
+    cos_sin_cache,
+    bs,
+):
+    torch.ops._C.fused_deepseek_v4_kv_rope_full_cache_bf16_insert(
+        kv,
+        k_cache,
+        slot_mapping,
+        positions.long(),
+        cos_sin_cache,
+        bs,
+    )
+
+
 def _fp8_full_cache_reference(
     q,
     kv,
@@ -889,3 +935,108 @@ def test_full_cache_bf16_matches_reference(
 
     torch.testing.assert_close(q_fused, q_ref, rtol=1e-2, atol=1e-2)
     torch.testing.assert_close(k_cache_fused, k_cache_ref, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    not _kv_only_full_cache_fp8_op_available(),
+    reason="KV-only full-cache FP8 DeepseekV4 op not built in",
+)
+@pytest.mark.parametrize("num_tokens", [4, 17])
+def test_kv_only_full_cache_fp8_matches_combined_op(num_tokens: int):
+    torch.manual_seed(6)
+    device = "cuda"
+    block_size = 16
+    q = torch.randn(num_tokens, 8, HEAD_DIM, dtype=torch.bfloat16, device=device)
+    kv = torch.randn(num_tokens, HEAD_DIM, dtype=torch.bfloat16, device=device)
+    positions = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    cos_sin_cache = make_cos_sin_cache(4096, ROPE_DIM, torch.float32, device)
+    slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    slot_mapping[-1] = -1
+    num_blocks = (num_tokens + block_size - 1) // block_size + 1
+    fp8_scale = torch.tensor([1.0], dtype=torch.float32, device=device)
+    q_fp8 = torch.empty_like(q, dtype=torch.float8_e4m3fn)
+    combined_cache = torch.zeros(
+        num_blocks,
+        block_size,
+        HEAD_DIM,
+        dtype=torch.float8_e4m3fn,
+        device=device,
+    )
+    kv_only_cache = torch.zeros_like(combined_cache)
+
+    _call_full_cache_fp8_fused(
+        q,
+        kv,
+        q_fp8,
+        combined_cache,
+        slot_mapping,
+        positions,
+        cos_sin_cache,
+        fp8_scale,
+        fp8_scale,
+        1e-6,
+        block_size,
+    )
+    _call_kv_only_full_cache_fp8_fused(
+        kv,
+        kv_only_cache,
+        slot_mapping,
+        positions,
+        cos_sin_cache,
+        fp8_scale,
+        block_size,
+    )
+
+    torch.testing.assert_close(
+        _as_stored_fp8(kv_only_cache).float(),
+        _as_stored_fp8(combined_cache).float(),
+        rtol=0,
+        atol=0,
+    )
+
+
+@pytest.mark.skipif(
+    not _kv_only_full_cache_bf16_op_available(),
+    reason="KV-only full-cache BF16 DeepseekV4 op not built in",
+)
+@pytest.mark.parametrize("num_tokens", [4, 17])
+def test_kv_only_full_cache_bf16_matches_combined_op(num_tokens: int):
+    torch.manual_seed(7)
+    device = "cuda"
+    block_size = 16
+    q = torch.randn(num_tokens, 8, HEAD_DIM, dtype=torch.bfloat16, device=device)
+    kv = torch.randn(num_tokens, HEAD_DIM, dtype=torch.bfloat16, device=device)
+    positions = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    cos_sin_cache = make_cos_sin_cache(4096, ROPE_DIM, torch.float32, device)
+    slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    slot_mapping[-1] = -1
+    num_blocks = (num_tokens + block_size - 1) // block_size + 1
+    combined_cache = torch.zeros(
+        num_blocks,
+        block_size,
+        HEAD_DIM,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    kv_only_cache = torch.zeros_like(combined_cache)
+
+    _call_full_cache_bf16_fused(
+        q,
+        kv,
+        combined_cache,
+        slot_mapping,
+        positions,
+        cos_sin_cache,
+        1e-6,
+        block_size,
+    )
+    _call_kv_only_full_cache_bf16_fused(
+        kv,
+        kv_only_cache,
+        slot_mapping,
+        positions,
+        cos_sin_cache,
+        block_size,
+    )
+
+    torch.testing.assert_close(kv_only_cache, combined_cache, rtol=0, atol=0)

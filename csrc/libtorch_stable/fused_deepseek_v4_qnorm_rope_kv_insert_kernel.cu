@@ -1204,3 +1204,116 @@ void fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
             stream);
       });
 }
+
+void fused_deepseek_v4_kv_rope_full_cache_bf16_insert(
+    torch::stable::Tensor const& kv,             // [N, 512] bf16
+    torch::stable::Tensor& k_cache,              // [num_blocks, bs, 512] bf16
+    torch::stable::Tensor const& slot_mapping,   // [num_tokens_insert] int64
+    torch::stable::Tensor const& position_ids,   // [N] int64
+    torch::stable::Tensor const& cos_sin_cache,  // [max_pos, 64] float32
+    int64_t cache_block_size) {
+  using torch::headeronly::ScalarType;
+  STD_TORCH_CHECK(kv.device().is_cuda() && kv.is_contiguous() &&
+                      kv.scalar_type() == ScalarType::BFloat16 &&
+                      kv.dim() == 2 && kv.size(1) == 512,
+                  "kv must be contiguous [N, 512] bfloat16 CUDA");
+  STD_TORCH_CHECK(k_cache.device().is_cuda() &&
+                      k_cache.scalar_type() == ScalarType::BFloat16 &&
+                      k_cache.dim() == 3 &&
+                      k_cache.size(1) == cache_block_size &&
+                      k_cache.size(2) == 512 && k_cache.stride(2) == 1,
+                  "k_cache must be [num_blocks, cache_block_size, 512] "
+                  "bfloat16 CUDA with contiguous rows");
+  STD_TORCH_CHECK(slot_mapping.device().is_cuda() &&
+                      slot_mapping.scalar_type() == ScalarType::Long,
+                  "slot_mapping must be int64 CUDA");
+  STD_TORCH_CHECK(position_ids.device().is_cuda() &&
+                      position_ids.scalar_type() == ScalarType::Long &&
+                      position_ids.size(0) == kv.size(0),
+                  "position_ids must be [N] int64 CUDA");
+  STD_TORCH_CHECK(cos_sin_cache.device().is_cuda() &&
+                      cos_sin_cache.scalar_type() == ScalarType::Float &&
+                      cos_sin_cache.dim() == 2 && cos_sin_cache.size(1) == 64,
+                  "cos_sin_cache must be [max_pos, 64] float32 CUDA");
+  STD_TORCH_CHECK(slot_mapping.size(0) <= kv.size(0),
+                  "slot_mapping must not exceed kv row count");
+
+  int const num_tokens_full = static_cast<int>(kv.size(0));
+  int const num_tokens_insert = static_cast<int>(slot_mapping.size(0));
+  if (num_tokens_full == 0) return;
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      kv.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream(kv.get_device_index());
+  int64_t const kv_block_stride = k_cache.stride(0) * 2;
+  int64_t const kv_token_stride = k_cache.stride(1) * 2;
+
+  vllm::deepseek_v4_fused_ops::launchFullCacheKernel<c10::BFloat16, false,
+                                                     false>(
+      nullptr, nullptr, 0, 0,
+      reinterpret_cast<c10::BFloat16 const*>(kv.const_data_ptr()),
+      reinterpret_cast<uint8_t*>(k_cache.mutable_data_ptr()),
+      slot_mapping.const_data_ptr<int64_t>(),
+      position_ids.const_data_ptr<int64_t>(),
+      cos_sin_cache.const_data_ptr<float>(), nullptr, nullptr, 0.0f,
+      num_tokens_full, num_tokens_insert, 0,
+      static_cast<int>(cache_block_size), kv_block_stride, kv_token_stride,
+      "fused_deepseek_v4_kv_rope_full_cache_bf16_insert", stream);
+}
+
+void fused_deepseek_v4_kv_rope_full_cache_fp8_insert(
+    torch::stable::Tensor const& kv,             // [N, 512] bf16
+    torch::stable::Tensor& k_cache,              // [num_blocks, bs, 512] fp8
+    torch::stable::Tensor const& slot_mapping,   // [num_tokens_insert] int64
+    torch::stable::Tensor const& position_ids,   // [N] int64
+    torch::stable::Tensor const& cos_sin_cache,  // [max_pos, 64] float32
+    torch::stable::Tensor const& fp8_scale,      // scalar float32
+    int64_t cache_block_size) {
+  using torch::headeronly::ScalarType;
+  STD_TORCH_CHECK(kv.device().is_cuda() && kv.is_contiguous() &&
+                      kv.scalar_type() == ScalarType::BFloat16 &&
+                      kv.dim() == 2 && kv.size(1) == 512,
+                  "kv must be contiguous [N, 512] bfloat16 CUDA");
+  STD_TORCH_CHECK(k_cache.device().is_cuda() &&
+                      k_cache.scalar_type() == ScalarType::Float8_e4m3fn &&
+                      k_cache.dim() == 3 &&
+                      k_cache.size(1) == cache_block_size &&
+                      k_cache.size(2) == 512 && k_cache.stride(2) == 1,
+                  "k_cache must be [num_blocks, cache_block_size, 512] "
+                  "float8_e4m3fn CUDA with contiguous rows");
+  STD_TORCH_CHECK(slot_mapping.device().is_cuda() &&
+                      slot_mapping.scalar_type() == ScalarType::Long,
+                  "slot_mapping must be int64 CUDA");
+  STD_TORCH_CHECK(position_ids.device().is_cuda() &&
+                      position_ids.scalar_type() == ScalarType::Long &&
+                      position_ids.size(0) == kv.size(0),
+                  "position_ids must be [N] int64 CUDA");
+  STD_TORCH_CHECK(cos_sin_cache.device().is_cuda() &&
+                      cos_sin_cache.scalar_type() == ScalarType::Float &&
+                      cos_sin_cache.dim() == 2 && cos_sin_cache.size(1) == 64,
+                  "cos_sin_cache must be [max_pos, 64] float32 CUDA");
+  STD_TORCH_CHECK(fp8_scale.device().is_cuda() &&
+                      fp8_scale.scalar_type() == ScalarType::Float &&
+                      fp8_scale.numel() == 1,
+                  "fp8_scale must contain one float32 CUDA value");
+  STD_TORCH_CHECK(slot_mapping.size(0) <= kv.size(0),
+                  "slot_mapping must not exceed kv row count");
+
+  int const num_tokens_full = static_cast<int>(kv.size(0));
+  int const num_tokens_insert = static_cast<int>(slot_mapping.size(0));
+  if (num_tokens_full == 0) return;
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      kv.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream(kv.get_device_index());
+
+  vllm::deepseek_v4_fused_ops::launchFullCacheKernel<c10::BFloat16, false,
+                                                     true>(
+      nullptr, nullptr, 0, 0,
+      reinterpret_cast<c10::BFloat16 const*>(kv.const_data_ptr()),
+      reinterpret_cast<uint8_t*>(k_cache.mutable_data_ptr()),
+      slot_mapping.const_data_ptr<int64_t>(),
+      position_ids.const_data_ptr<int64_t>(),
+      cos_sin_cache.const_data_ptr<float>(), fp8_scale.const_data_ptr<float>(),
+      nullptr, 0.0f, num_tokens_full, num_tokens_insert, 0,
+      static_cast<int>(cache_block_size), k_cache.stride(0), k_cache.stride(1),
+      "fused_deepseek_v4_kv_rope_full_cache_fp8_insert", stream);
+}
