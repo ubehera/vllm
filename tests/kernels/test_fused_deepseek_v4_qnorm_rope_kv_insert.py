@@ -152,6 +152,10 @@ def _kv_only_full_cache_bf16_op_available() -> bool:
     return hasattr(torch.ops._C, "fused_deepseek_v4_kv_rope_full_cache_bf16_insert")
 
 
+def _kv_only_packed_op_available() -> bool:
+    return hasattr(torch.ops._C, "fused_deepseek_v4_kv_rope_quant_insert")
+
+
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available() or not _op_available(),
     reason="CUDA not available or fused DeepseekV4 op not built in",
@@ -643,6 +647,54 @@ def test_combined_q_and_kv(
 
 
 # ── Full-cache (FlashInfer) path parity ──────────────────────────────────────
+
+
+@pytest.mark.skipif(
+    not _kv_only_packed_op_available(),
+    reason="packed UE8M0 KV-only op not built in",
+)
+@pytest.mark.parametrize("num_tokens", [1, 17, 2048])
+@pytest.mark.parametrize("block_size", [16, 64])
+def test_packed_kv_only_is_byte_exact_with_combined_op(
+    num_tokens: int, block_size: int
+):
+    torch.manual_seed(17)
+    device = "cuda"
+    dtype = torch.bfloat16
+    max_pos = max(num_tokens + 32, 4096)
+    kv = torch.randn(num_tokens, HEAD_DIM, dtype=dtype, device=device)
+    positions = torch.arange(num_tokens, dtype=torch.int64, device=device) % max_pos
+    cos_sin_cache = make_cos_sin_cache(max_pos, ROPE_DIM, torch.float32, device)
+    slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    if num_tokens > 1:
+        slot_mapping[::11] = -1
+
+    num_blocks = (num_tokens + block_size - 1) // block_size + 1
+    combined_cache = torch.zeros(
+        num_blocks, block_size * HEAD_BYTES, dtype=torch.uint8, device=device
+    )
+    kv_only_cache = torch.zeros_like(combined_cache)
+    dummy_q = torch.zeros(num_tokens, 1, HEAD_DIM, dtype=dtype, device=device)
+    _call_fused(
+        dummy_q,
+        8,
+        kv,
+        combined_cache,
+        slot_mapping,
+        positions,
+        cos_sin_cache,
+        1e-6,
+        block_size,
+    )
+    torch.ops._C.fused_deepseek_v4_kv_rope_quant_insert(
+        kv,
+        kv_only_cache,
+        slot_mapping,
+        positions,
+        cos_sin_cache,
+        block_size,
+    )
+    torch.testing.assert_close(kv_only_cache, combined_cache, rtol=0, atol=0)
 
 
 def _call_full_cache_fp8_fused(

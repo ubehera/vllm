@@ -233,31 +233,21 @@ def _insert_context_kv(
 ) -> None:
     """RoPE + quant + paged-cache insert of (already kv_norm'd) context KV.
 
-    Context tokens have no query, so plain-row caches use KV-only insert ops.
-    The UE8M0 cache keeps the combined Q/KV op until it has a KV-only variant.
+    Context tokens have no query, so every cache layout uses a KV-only insert.
     """
     swa_cache = attn.swa_cache_layer.kv_cache
     block_size = attn.swa_cache_layer.block_size
     cos_sin_cache = attn.rotary_emb.cos_sin_cache
     cache_dtype = swa_cache.dtype
-    n_ctx = kv.shape[0]
     if cache_dtype == torch.uint8:
         # fp8_ds_mla UE8M0 paged layout
-        dummy_q = torch.zeros(
-            (n_ctx, attn.n_local_heads, attn.head_dim),
-            dtype=kv.dtype,
-            device=kv.device,
-        )
         swa_2d = swa_cache.view(swa_cache.shape[0], -1)
-        torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
-            dummy_q,
+        torch.ops._C.fused_deepseek_v4_kv_rope_quant_insert(
             kv,
             swa_2d,
             slot_mapping,
             positions,
             cos_sin_cache,
-            attn.padded_heads,
-            attn.eps,
             block_size,
         )
     elif cache_dtype == torch.bfloat16:

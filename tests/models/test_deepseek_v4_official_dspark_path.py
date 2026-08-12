@@ -12,8 +12,10 @@ def test_deepseek_v4_uses_upstream_cache_managed_dspark_layers() -> None:
     assert "class DSparkDeepseekV4Model" in source
     assert "DeepseekV4DecoderLayer(" in source
     assert "_main_kv_cache" not in source
+    assert "fused_deepseek_v4_kv_rope_quant_insert" in source
     assert "fused_deepseek_v4_kv_rope_full_cache_fp8_insert" in source
     assert "fused_deepseek_v4_kv_rope_full_cache_bf16_insert" in source
+    assert "dummy_q" not in source
 
 
 def test_deepseek_v4_dspark_keeps_v2_sampling_hooks() -> None:
