@@ -1,28 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+from __future__ import annotations
+
 import math
 from functools import cache
-from typing import TYPE_CHECKING, Any
 
 import torch
 
 from vllm.platforms import current_platform
-from vllm.utils.import_utils import has_tilelang
+from vllm.tilelang_utils import T, tilelang, tilelang_jit
 from vllm.utils.math_utils import cdiv
-
-# TileLang is used for MHC on CUDA and ROCm. Keep non-GPU imports cheap so
-# registering the Python wrapper modules does not require TileLang everywhere.
-if TYPE_CHECKING or current_platform.is_cuda_alike():
-    if not has_tilelang():
-        raise ImportError(
-            "tilelang is required for mhc but is not installed. Install it with "
-            "`pip install tilelang`."
-        )
-    import tilelang
-    import tilelang.language as T
-else:
-    tilelang = None  # type: ignore[assignment]
-    T = None  # type: ignore[assignment]
 
 ENABLE_PDL = current_platform.is_arch_support_pdl() and current_platform.is_cuda()
 
@@ -40,18 +28,7 @@ def compute_num_split(block_k: int, k: int | None, grid_size: int) -> int:
     return split_k
 
 
-pass_configs: dict[tilelang.PassConfigKey, Any] = {
-    tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
-    tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
-}
-
-if current_platform.is_cuda():
-    pass_configs[tilelang.PassConfigKey.TL_PTXAS_REGISTER_USAGE_LEVEL] = 10
-
-
-@tilelang.jit(
-    pass_configs=pass_configs,
-)
+@tilelang_jit
 def mhc_pre_big_fuse_tilelang(
     gemm_out_mul,
     gemm_out_sqrsum,
@@ -191,9 +168,7 @@ def mhc_pre_big_fuse_tilelang(
 # Copied from https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/layers/mhc.py#L478
 
 
-@tilelang.jit(
-    pass_configs=pass_configs,
-)
+@tilelang_jit
 def mhc_pre_big_fuse_with_norm_tilelang(
     gemm_out_mul,
     gemm_out_sqrsum,
@@ -353,9 +328,7 @@ def mhc_pre_big_fuse_with_norm_tilelang(
             T.pdl_trigger()
 
 
-@tilelang.jit(
-    pass_configs=pass_configs,
-)
+@tilelang_jit
 def mhc_pre_big_fuse_broadcast_with_norm_tilelang(
     gemm_out_mul,
     gemm_out_sqrsum,
@@ -517,9 +490,7 @@ def mhc_pre_big_fuse_broadcast_with_norm_tilelang(
             T.pdl_trigger()
 
 
-@tilelang.jit(
-    pass_configs=pass_configs,
-)
+@tilelang_jit
 def mhc_fused_tilelang(
     comb_mix,
     residual_in,
@@ -640,9 +611,7 @@ def mhc_fused_tilelang(
             T.pdl_trigger()
 
 
-@tilelang.jit(
-    pass_configs=pass_configs,
-)
+@tilelang_jit
 def mhc_post_tilelang(
     a,
     b,
@@ -695,72 +664,7 @@ def mhc_post_tilelang(
             T.pdl_trigger()
 
 
-@tilelang.jit(
-    pass_configs=pass_configs,
-)
-def mhc_post_mean_tilelang(
-    a,
-    b,
-    c,
-    d,
-    out,
-    hc: int,
-    hidden: int,
-    n_thr: int = 128,
-    h_blk: int = 1024,
-) -> tilelang.JITKernel:
-    n = T.dynamic("num_tokens")
-    h = hidden
-    h_blk = math.gcd(hidden, h_blk)
-
-    a: T.Tensor((n, hc, hc), T.float32)  # type: ignore[no-redef, valid-type]
-    b: T.Tensor((n, hc, h), T.bfloat16)  # type: ignore[no-redef, valid-type]
-    c: T.Tensor((n, hc), T.float32)  # type: ignore[no-redef, valid-type]
-    d: T.Tensor((n, h), T.bfloat16)  # type: ignore[no-redef, valid-type]
-    out: T.Tensor((n, h), T.bfloat16)  # type: ignore[no-redef, valid-type]
-
-    with T.Kernel(n, threads=n_thr) as i_n:
-        b_shared = T.alloc_shared((hc, h_blk), T.bfloat16)
-        d_shared = T.alloc_shared(h_blk, T.bfloat16)
-
-        b_local = T.alloc_fragment((hc, h_blk), T.float32)
-        d_local = T.alloc_fragment(h_blk, T.float32)
-        a_local = T.alloc_fragment((hc, hc), T.float32)
-        c_local = T.alloc_fragment(hc, T.float32)
-
-        if ENABLE_PDL:
-            T.pdl_sync()
-        T.copy(a[i_n, 0, 0], a_local)
-        T.copy(c[i_n, 0], c_local)
-
-        for i0_h in T.Serial(T.ceildiv(h, h_blk)):
-            mean_local = T.alloc_fragment(h_blk, T.float32)
-            T.clear(mean_local)
-
-            T.copy(b[i_n, 0, i0_h * h_blk], b_shared)
-            T.copy(d[i_n, i0_h * h_blk], d_shared)
-            T.copy(b_shared, b_local)
-            T.copy(d_shared, d_local)
-
-            for i_hco in T.serial(hc):
-                for i1_h in T.Parallel(h_blk):
-                    val = T.alloc_var(
-                        T.float32,
-                        init=c_local[i_hco] * d_local[i1_h],
-                    )
-                    for i_hci in T.unroll(hc):
-                        val += a_local[i_hci, i_hco] * b_local[i_hci, i1_h]
-                    mean_local[i1_h] += val * (1.0 / hc)
-
-            T.copy(mean_local, out[i_n, i0_h * h_blk])
-
-        if ENABLE_PDL:
-            T.pdl_trigger()
-
-
-@tilelang.jit(
-    pass_configs=pass_configs,
-)
+@tilelang_jit
 def hc_prenorm_gemm_tilelang(
     x,
     fn,
@@ -844,9 +748,7 @@ def hc_prenorm_gemm_tilelang(
             T.pdl_trigger()
 
 
-@tilelang.jit(
-    pass_configs=pass_configs,
-)
+@tilelang_jit
 def hc_prenorm_gemm_block_m_tilelang(
     x,
     fn,
@@ -941,9 +843,7 @@ def hc_prenorm_gemm_block_m_tilelang(
             T.pdl_trigger()
 
 
-@tilelang.jit(
-    pass_configs=pass_configs,
-)
+@tilelang_jit
 def hc_head_fuse_tilelang(
     residual,
     fn,
@@ -1035,271 +935,6 @@ def hc_head_fuse_tilelang(
                     ol[i1_h] += pre * xl[i_hc, i1_h]
 
             T.copy(ol, out[i, i0_h * h_block], disable_tma=True)
-
-        if ENABLE_PDL:
-            T.pdl_trigger()
-
-
-@tilelang.jit(
-    pass_configs=pass_configs,
-)
-def mhc_post_hc_head_tilelang(
-    comb_mix,
-    residual,
-    post_mix,
-    layer_input,
-    fn,
-    hc_scale,
-    hc_base,
-    out,
-    hidden_size: int,
-    rms_eps: float,
-    hc_eps: float,
-    hc_mult: int = 4,
-    n_thr: int = 128,
-    h_blk: int = 1024,
-):
-    """Fuse final MHC post reconstruction with hc_head.
-
-    This computes the same result as:
-        hc_head_fuse_tilelang(mhc_post_tilelang(...))
-
-    It deliberately recomputes the post-mapped residual in two passes so the
-    [num_tokens, hc_mult, hidden_size] post tensor does not have to live in
-    global memory.
-    """
-    num_tokens = T.dynamic("num_tokens")
-    hc_dim = hc_mult * hidden_size
-    h_block = math.gcd(h_blk, hidden_size)
-    n_h = hidden_size // h_block
-
-    comb_mix: T.Tensor[[num_tokens, hc_mult, hc_mult], T.float32]  # type: ignore[no-redef,valid-type]
-    residual: T.Tensor[[num_tokens, hc_mult, hidden_size], T.bfloat16]  # type: ignore[no-redef,valid-type]
-    post_mix: T.Tensor[[num_tokens, hc_mult], T.float32]  # type: ignore[no-redef,valid-type]
-    layer_input: T.Tensor[[num_tokens, hidden_size], T.bfloat16]  # type: ignore[no-redef,valid-type]
-    fn: T.Tensor[[hc_mult, hc_dim], T.float32]  # type: ignore[no-redef,valid-type]
-    hc_scale: T.Tensor[[1], T.float32]  # type: ignore[no-redef,valid-type]
-    hc_base: T.Tensor[[hc_mult], T.float32]  # type: ignore[no-redef,valid-type]
-    out: T.Tensor[[num_tokens, hidden_size], T.bfloat16]  # type: ignore[no-redef,valid-type]
-
-    with T.Kernel(num_tokens, threads=n_thr) as i:
-        if ENABLE_PDL:
-            T.pdl_sync()
-
-        comb_shared = T.alloc_shared((hc_mult, hc_mult), T.float32)
-        post_shared = T.alloc_shared(hc_mult, T.float32)
-        T.copy(comb_mix[i, 0, 0], comb_shared, disable_tma=True)
-        T.copy(post_mix[i, 0], post_shared, disable_tma=True)
-
-        sqrsum_r = T.alloc_reducer((1,), T.float32, replication="all")
-        mixes_r = T.alloc_reducer((hc_mult,), T.float32, replication="all")
-        T.fill(sqrsum_r, 0.0)
-        T.fill(mixes_r, 0.0)
-
-        for i_h in T.serial(n_h):
-            residual_shared = T.alloc_shared((hc_mult, h_block), T.bfloat16)
-            layer_shared = T.alloc_shared(h_block, T.bfloat16)
-            residual_local = T.alloc_fragment((hc_mult, h_block), T.float32)
-            layer_local = T.alloc_fragment(h_block, T.float32)
-            post_local = T.alloc_fragment((hc_mult, h_block), T.float32)
-
-            T.copy(residual[i, 0, i_h * h_block], residual_shared, disable_tma=True)
-            T.copy(layer_input[i, i_h * h_block], layer_shared, disable_tma=True)
-            T.copy(residual_shared, residual_local)
-            T.copy(layer_shared, layer_local)
-
-            for out_hc, h in T.Parallel(hc_mult, h_block):
-                val = T.alloc_var(
-                    T.float32, init=post_shared[out_hc] * layer_local[h]
-                )
-                for in_hc in T.unroll(hc_mult):
-                    val += comb_shared[in_hc, out_hc] * residual_local[in_hc, h]
-                post_local[out_hc, h] = val
-                sqrsum_r[0] += val * val
-
-            for mix_hc in T.unroll(hc_mult):
-                for out_hc in T.serial(hc_mult):
-                    fn_local = T.alloc_fragment(h_block, T.float32)
-                    T.copy(
-                        fn[mix_hc, out_hc * hidden_size + i_h * h_block],
-                        fn_local,
-                        disable_tma=True,
-                    )
-                    for h in T.Parallel(h_block):
-                        mixes_r[mix_hc] += post_local[out_hc, h] * fn_local[h]
-
-        T.finalize_reducer(sqrsum_r)
-        T.finalize_reducer(mixes_r)
-
-        pre_mix_shared = T.alloc_shared(hc_mult, T.float32)
-        rsqrt_val = T.alloc_fragment(1, T.float32)
-        rsqrt_val[0] = T.rsqrt(sqrsum_r[0] / hc_dim + rms_eps)
-        for mix_hc in T.Parallel(hc_mult):
-            pre_mix_shared[mix_hc] = (
-                T.sigmoid(
-                    mixes_r[mix_hc] * rsqrt_val[0] * hc_scale[0] + hc_base[mix_hc]
-                )
-                + hc_eps
-            )
-
-        for i_h in T.Pipelined(n_h, num_stages=2):
-            residual_shared = T.alloc_shared((hc_mult, h_block), T.bfloat16)
-            layer_shared = T.alloc_shared(h_block, T.bfloat16)
-            residual_local = T.alloc_fragment((hc_mult, h_block), T.float32)
-            layer_local = T.alloc_fragment(h_block, T.float32)
-            out_local = T.alloc_fragment(h_block, T.float32)
-            T.clear(out_local)
-
-            T.copy(residual[i, 0, i_h * h_block], residual_shared, disable_tma=True)
-            T.copy(layer_input[i, i_h * h_block], layer_shared, disable_tma=True)
-            T.copy(residual_shared, residual_local)
-            T.copy(layer_shared, layer_local)
-
-            for out_hc in T.serial(hc_mult):
-                pre = pre_mix_shared[out_hc]
-                for h in T.Parallel(h_block):
-                    val = T.alloc_var(
-                        T.float32, init=post_shared[out_hc] * layer_local[h]
-                    )
-                    for in_hc in T.unroll(hc_mult):
-                        val += comb_shared[in_hc, out_hc] * residual_local[in_hc, h]
-                    out_local[h] += pre * val
-
-            T.copy(out_local, out[i, i_h * h_block], disable_tma=True)
-
-        if ENABLE_PDL:
-            T.pdl_trigger()
-
-
-@tilelang.jit(
-    pass_configs=pass_configs,
-)
-def mhc_post_mean_hc_head_tilelang(
-    comb_mix,
-    residual,
-    post_mix,
-    layer_input,
-    fn,
-    hc_scale,
-    hc_base,
-    out,
-    mean_out,
-    hidden_size: int,
-    rms_eps: float,
-    hc_eps: float,
-    hc_mult: int = 4,
-    n_thr: int = 128,
-    h_blk: int = 1024,
-):
-    """Fuse final MHC post, aux mean, and hc_head.
-
-    This is for Eagle/DSpark final aux-hidden capture where callers need
-    ``mhc_post(...).mean(dim=1)`` and the regular hc_head output, but not the
-    full post-mapped [num_tokens, hc_mult, hidden_size] tensor.
-    """
-    num_tokens = T.dynamic("num_tokens")
-    hc_dim = hc_mult * hidden_size
-    h_block = math.gcd(h_blk, hidden_size)
-    n_h = hidden_size // h_block
-
-    comb_mix: T.Tensor[[num_tokens, hc_mult, hc_mult], T.float32]  # type: ignore[no-redef,valid-type]
-    residual: T.Tensor[[num_tokens, hc_mult, hidden_size], T.bfloat16]  # type: ignore[no-redef,valid-type]
-    post_mix: T.Tensor[[num_tokens, hc_mult], T.float32]  # type: ignore[no-redef,valid-type]
-    layer_input: T.Tensor[[num_tokens, hidden_size], T.bfloat16]  # type: ignore[no-redef,valid-type]
-    fn: T.Tensor[[hc_mult, hc_dim], T.float32]  # type: ignore[no-redef,valid-type]
-    hc_scale: T.Tensor[[1], T.float32]  # type: ignore[no-redef,valid-type]
-    hc_base: T.Tensor[[hc_mult], T.float32]  # type: ignore[no-redef,valid-type]
-    out: T.Tensor[[num_tokens, hidden_size], T.bfloat16]  # type: ignore[no-redef,valid-type]
-    mean_out: T.Tensor[[num_tokens, hidden_size], T.bfloat16]  # type: ignore[no-redef,valid-type]
-
-    with T.Kernel(num_tokens, threads=n_thr) as i:
-        if ENABLE_PDL:
-            T.pdl_sync()
-
-        comb_shared = T.alloc_shared((hc_mult, hc_mult), T.float32)
-        post_shared = T.alloc_shared(hc_mult, T.float32)
-        T.copy(comb_mix[i, 0, 0], comb_shared, disable_tma=True)
-        T.copy(post_mix[i, 0], post_shared, disable_tma=True)
-
-        sqrsum_r = T.alloc_reducer((1,), T.float32, replication="all")
-        mixes_r = T.alloc_reducer((hc_mult,), T.float32, replication="all")
-        T.fill(sqrsum_r, 0.0)
-        T.fill(mixes_r, 0.0)
-
-        for i_h in T.serial(n_h):
-            residual_shared = T.alloc_shared((hc_mult, h_block), T.bfloat16)
-            layer_shared = T.alloc_shared(h_block, T.bfloat16)
-            residual_local = T.alloc_fragment((hc_mult, h_block), T.float32)
-            layer_local = T.alloc_fragment(h_block, T.float32)
-            post_local = T.alloc_fragment((hc_mult, h_block), T.float32)
-
-            T.copy(residual[i, 0, i_h * h_block], residual_shared, disable_tma=True)
-            T.copy(layer_input[i, i_h * h_block], layer_shared, disable_tma=True)
-            T.copy(residual_shared, residual_local)
-            T.copy(layer_shared, layer_local)
-
-            for out_hc, h in T.Parallel(hc_mult, h_block):
-                val = T.alloc_var(
-                    T.float32, init=post_shared[out_hc] * layer_local[h]
-                )
-                for in_hc in T.unroll(hc_mult):
-                    val += comb_shared[in_hc, out_hc] * residual_local[in_hc, h]
-                post_local[out_hc, h] = val
-                sqrsum_r[0] += val * val
-
-            for mix_hc in T.unroll(hc_mult):
-                for out_hc in T.serial(hc_mult):
-                    fn_local = T.alloc_fragment(h_block, T.float32)
-                    T.copy(
-                        fn[mix_hc, out_hc * hidden_size + i_h * h_block],
-                        fn_local,
-                        disable_tma=True,
-                    )
-                    for h in T.Parallel(h_block):
-                        mixes_r[mix_hc] += post_local[out_hc, h] * fn_local[h]
-
-        T.finalize_reducer(sqrsum_r)
-        T.finalize_reducer(mixes_r)
-
-        pre_mix_shared = T.alloc_shared(hc_mult, T.float32)
-        rsqrt_val = T.alloc_fragment(1, T.float32)
-        rsqrt_val[0] = T.rsqrt(sqrsum_r[0] / hc_dim + rms_eps)
-        for mix_hc in T.Parallel(hc_mult):
-            pre_mix_shared[mix_hc] = (
-                T.sigmoid(
-                    mixes_r[mix_hc] * rsqrt_val[0] * hc_scale[0] + hc_base[mix_hc]
-                )
-                + hc_eps
-            )
-
-        for i_h in T.Pipelined(n_h, num_stages=2):
-            residual_shared = T.alloc_shared((hc_mult, h_block), T.bfloat16)
-            layer_shared = T.alloc_shared(h_block, T.bfloat16)
-            residual_local = T.alloc_fragment((hc_mult, h_block), T.float32)
-            layer_local = T.alloc_fragment(h_block, T.float32)
-            out_local = T.alloc_fragment(h_block, T.float32)
-            mean_local = T.alloc_fragment(h_block, T.float32)
-            T.clear(out_local)
-            T.clear(mean_local)
-
-            T.copy(residual[i, 0, i_h * h_block], residual_shared, disable_tma=True)
-            T.copy(layer_input[i, i_h * h_block], layer_shared, disable_tma=True)
-            T.copy(residual_shared, residual_local)
-            T.copy(layer_shared, layer_local)
-
-            for out_hc in T.serial(hc_mult):
-                pre = pre_mix_shared[out_hc]
-                for h in T.Parallel(h_block):
-                    val = T.alloc_var(
-                        T.float32, init=post_shared[out_hc] * layer_local[h]
-                    )
-                    for in_hc in T.unroll(hc_mult):
-                        val += comb_shared[in_hc, out_hc] * residual_local[in_hc, h]
-                    out_local[h] += pre * val
-                    mean_local[h] += val * (1.0 / hc_mult)
-
-            T.copy(out_local, out[i, i_h * h_block], disable_tma=True)
-            T.copy(mean_local, mean_out[i, i_h * h_block], disable_tma=True)
 
         if ENABLE_PDL:
             T.pdl_trigger()

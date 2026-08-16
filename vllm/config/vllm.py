@@ -69,36 +69,13 @@ logger = init_logger(__name__)
 DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
     {
         "DeepseekV2ForCausalLM",
+        "DeepseekV4ForCausalLM",
         "GraniteMoeForCausalLM",
         "InklingForCausalLM",
         "InklingForConditionalGeneration",
         "KimiK3ForConditionalGeneration",
         "LongcatFlashNgramForCausalLM",
         "Qwen2MoeForCausalLM",
-    }
-)
-
-# Architectures that lack @support_torch_compile and are known-good under
-# breakable cudagraph. DeepSeek-V4 is deliberately absent -- see
-# _should_auto_enable_breakable_cudagraph for the measurement.
-_BREAKABLE_CUDAGRAPH_AUTO_ENABLE_ARCHITECTURES = frozenset(
-    {
-        "InklingForCausalLM",
-        "InklingForConditionalGeneration",
-        "KimiK3ForConditionalGeneration",
-        "KimiK3MTPModel",
-        "KimiLinearForCausalLM",
-        "MiniMaxM3SparseForCausalLM",
-        "MiniMaxM3SparseForConditionalGeneration",
-    }
-)
-
-# Architectures that default to V1 on ROCm: the V2 runner faults during the
-# profile run. VLLM_USE_V2_MODEL_RUNNER=1 still forces V2.
-# TODO: fix V2 enablement
-ROCM_EXCLUDED_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
-    {
-        "KimiK3ForConditionalGeneration",
     }
 )
 
@@ -109,10 +86,10 @@ def default_v2_model_runner_architectures() -> frozenset[str]:
     from vllm.platforms import current_platform
 
     if current_platform.is_rocm():
-        return (
-            DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES
-            - ROCM_EXCLUDED_V2_MODEL_RUNNER_ARCHITECTURES
-        )
+        # TODO(rocm): DeepSeek V4 is still faster on MRV1 on ROCm. The
+        # attention layer picks the eager cudagraph region MRV1 needs, so
+        # this is a perf default only; drop it once MRV2 catches up.
+        return DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES - {"DeepseekV4ForCausalLM"}
     return DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES
 
 
@@ -141,24 +118,6 @@ IS_DENSE = False
 #     IS_QUANTIZED = lambda c: c.model_config.is_quantized()
 #     IS_DENSE = lambda c: not c.model_config.is_model_moe()
 # See https://github.com/vllm-project/vllm/issues/25689.
-
-
-def _should_auto_enable_breakable_cudagraph(
-    model_config: ModelConfig,
-) -> bool:
-    # Auto-enable breakable cudagraph only for architectures that lack
-    # @support_torch_compile and are known-good under it (MiniMax M3 and Inkling
-    # retain their upstream auto-enable). DeepSeek-V4 is deliberately excluded:
-    # breakable mode disables the torch.compile pipeline (equivalent to
-    # -cc.mode=none) and runs attention eagerly every decode step, which on SM12x
-    # is 1.5-3.8x SLOWER for MTP decode and degrades with output length (measured
-    # on RTX PRO 6000 / SM120 and 2x GB10 / SM121). FULL_AND_PIECEWISE +
-    # torch.compile is correct (GSM8K parity, bare-prompt clean) and faster, so
-    # it is the DSv4 default. Opt in with VLLM_USE_BREAKABLE_CUDAGRAPH=1.
-    return any(
-        arch in _BREAKABLE_CUDAGRAPH_AUTO_ENABLE_ARCHITECTURES
-        for arch in model_config.architectures
-    )
 
 
 def enable_norm_fusion(cfg: "VllmConfig") -> bool:
@@ -662,33 +621,10 @@ class VllmConfig:
         if self.parallel_config.prefill_context_parallel_size > 1:
             return True
 
-        # DSpark supports both GPU model runners, but DeepSeek-V4 is not
-        # otherwise a default-V2 architecture. Prefer the validated V2 path;
-        # an explicit VLLM_USE_V2_MODEL_RUNNER=0 above keeps V1 reachable.
-        #
-        # This fork removed upstream's routing on 2026-08-03 because V2 lost
-        # long-context recall under concurrency (8 samples per runner, same
-        # serve: V1 mean 22.25 [20,24] vs V2 mean 10.50 [6,13], Mann-Whitney
-        # U=0). Restored 2026-08-09: that collapse was NOT a property of the
-        # runner. It was the same-step ghost-block race in the prefix cache
-        # (vllm-project/vllm#42359) -- a block's hash becomes visible before the
-        # forward writes its KV, and a serve that loses the race keeps serving
-        # from the poisoned blocks. With VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT
-        # on, 4 fresh serves per runner, 3 arthur c=12 runs each:
-        #
-        #   V1  serve means 22.3 / 21.7 / 21.7 / 21.0   gate mean 21.67
-        #   V2  serve means 22.0 / 20.7 / 22.7 / 22.7   gate mean 22.00
-        #   Mann-Whitney p = 0.697, no single-digit serve on either side
-        #
-        # and V2 leads on every other measured axis: pp2048 +3.1/+4.2/+7.1% at
-        # d8192/16384/32768, tg128 +4/+20/+28%, TTFT lower at every depth, KV
-        # +24.9%. GSM8K, issue19, multi-needle and c=1 all tie. (The older
-        # "+6.6% draft acceptance" claim does NOT survive re-measurement: 2.772
-        # V1 vs 2.710 V2, i.e. a tie -- it was measured while V2 was poisoned.)
-        #
-        # V1 stays fully supported: VLLM_USE_V2_MODEL_RUNNER=0 forces it, and the
-        # env check above takes precedence over every rule here.
-        # See docs/sm120/experiments/2026-08-09-runner-arbitration-786582103a/.
+        # DSpark is implemented only by the V2 GPU model runner, and DeepSeek-V4
+        # is not otherwise a default-V2 architecture, so force V2 for it. If V2
+        # is unsupported for the rest of the config, _validate_v2_model_runner
+        # raises rather than silently falling back to V1 (which can't run dspark).
         if (
             self.speculative_config is not None
             and self.speculative_config.method == "dspark"
@@ -835,6 +771,7 @@ class VllmConfig:
             quant_config.maybe_update_config(
                 model_config.model,
                 hf_config=model_config.hf_config,
+                revision=model_config.revision,
             )
             return quant_config
         return None
@@ -1070,6 +1007,31 @@ class VllmConfig:
             "expandable_segments is automatically disabled)."
         )
 
+    def _verify_sampling_replay_config(self) -> None:
+        model_config = self.model_config
+        if model_config is None or not model_config.return_sampling_mask:
+            return
+        if not self.use_v2_model_runner:
+            raise ValueError("sampling distribution replay requires Model Runner V2")
+        if self.speculative_config is not None:
+            raise ValueError(
+                "sampling distribution replay does not support speculative decoding"
+            )
+        if model_config.is_diffusion:
+            raise ValueError(
+                "sampling distribution replay does not support diffusion models"
+            )
+        if model_config.logits_processors:
+            raise ValueError(
+                "sampling distribution replay does not support custom logits processors"
+            )
+        if model_config.logprobs_mode != "processed_logprobs":
+            raise ValueError(
+                "sampling distribution replay requires "
+                "logprobs_mode='processed_logprobs' so that returned logprobs "
+                "are normalized over the same nucleus as the sampling mask"
+            )
+
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
 
@@ -1096,6 +1058,14 @@ class VllmConfig:
                     "--enable-return-routed-experts is incompatible with "
                     "pipeline parallelism (PP > 1)."
                 )
+            if (
+                self.parallel_config.decode_context_parallel_size > 1
+                or self.parallel_config.prefill_context_parallel_size > 1
+            ):
+                raise ValueError(
+                    "--enable-return-routed-experts is incompatible with context "
+                    "parallelism (DCP > 1 or PCP > 1)."
+                )
 
             # Incompatible with any KV connector — covers both PD disaggregation
             # (kv_producer/kv_consumer: routing captured on P can't reach D) and
@@ -1110,6 +1080,8 @@ class VllmConfig:
                     "--enable-return-routed-experts is incompatible with KV "
                     "connectors (PD disaggregation, KV cache offload)."
                 )
+
+        self._verify_sampling_replay_config()
 
         if self.lora_config is not None:
             self.lora_config.verify_with_model_config(self.model_config)
@@ -1300,6 +1272,18 @@ class VllmConfig:
             self.compilation_config.mode = CompilationMode.NONE
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
+        if self.profiler_config.profiler == "proton":
+            if not current_platform.is_cuda():
+                raise ValueError(
+                    "The Proton profiler currently supports NVIDIA CUDA only"
+                )
+            if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+                raise ValueError(
+                    "The Proton profiler requires CUDA graphs to be disabled. "
+                    "Use --enforce-eager or set "
+                    "--compilation-config.cudagraph_mode=none."
+                )
+
         if os.environ.get("TORCH_COMPILE_DISABLE") == "1":
             logger.warning_once(
                 "TORCH_COMPILE_DISABLE is set, disabling torch.compile. "
@@ -1307,15 +1291,27 @@ class VllmConfig:
             )
             self.compilation_config.mode = CompilationMode.NONE
 
-        # Some model classes don't carry @support_torch_compile and rely on the
-        # breakable cudagraph PIECEWISE path; auto-enable it for those unless the
-        # user explicitly opted out. DeepSeek-V4 is deliberately excluded (see
-        # _should_auto_enable_breakable_cudagraph) — it is faster on
-        # FULL_AND_PIECEWISE + torch.compile.
+        # For model classes don't carry @support_torch_compile —
+        # the breakable cudagraph is the supported PIECEWISE path. Auto-enable
+        # it unless the user has explicitly opted out via the env var.
         if (
             self.model_config is not None
             and "VLLM_USE_BREAKABLE_CUDAGRAPH" not in os.environ
-            and _should_auto_enable_breakable_cudagraph(self.model_config)
+            and any(
+                a
+                in (
+                    "DeepseekV4ForCausalLM",
+                    "DeepSeekV4MTPModel",
+                    "InklingForCausalLM",
+                    "InklingForConditionalGeneration",
+                    "KimiK3ForConditionalGeneration",
+                    "KimiK3MTPModel",
+                    "KimiLinearForCausalLM",
+                    "MiniMaxM3SparseForCausalLM",
+                    "MiniMaxM3SparseForConditionalGeneration",
+                )
+                for a in self.model_config.architectures
+            )
         ):
             os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
             logger.info_once(
@@ -1826,21 +1822,15 @@ class VllmConfig:
     def _set_max_num_scheduled_tokens(self):
         """
         In most cases, the scheduler may schedule a batch with as many tokens as the
-        worker is configured to handle. However for some speculative decoding methods,
-        the drafter model may insert additional slots into the batch when drafting.
-        To account for this, we need to decrease the max_num_scheduled_tokens by an
-        upper bound on the number of slots that can be added.
+        worker is configured to handle.
         """
         if self.speculative_config is not None:
             scheduled_token_delta = (
                 self.speculative_config.max_num_new_slots_for_drafting
-                * self.scheduler_config.max_num_seqs
             )
             max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
             if self.scheduler_config.max_num_scheduled_tokens is None:
-                self.scheduler_config.max_num_scheduled_tokens = (
-                    max_num_batched_tokens - scheduled_token_delta
-                )
+                self.scheduler_config.max_num_scheduled_tokens = max_num_batched_tokens
 
             if self.scheduler_config.max_num_scheduled_tokens <= 0:
                 raise ValueError(
@@ -1849,7 +1839,7 @@ class VllmConfig:
                     " the speculative decoding settings, which does not allow"
                     " any tokens to be scheduled. Increase max_num_batched_tokens"
                     " to accommodate the additional draft token slots, or decrease"
-                    " num_speculative_tokens or max_num_seqs."
+                    " num_speculative_tokens."
                 )
             if self.scheduler_config.max_num_scheduled_tokens < 8192:
                 logger.warning_once(
@@ -1858,19 +1848,14 @@ class VllmConfig:
                     " the speculative decoding settings. This may lead to suboptimal"
                     " performance. Consider increasing max_num_batched_tokens to"
                     " accommodate the additional draft token slots, or decrease"
-                    " num_speculative_tokens or max_num_seqs.",
+                    " num_speculative_tokens.",
                 )
 
-            max_num_scheduled_tokens = self.scheduler_config.max_num_scheduled_tokens
-            if max_num_batched_tokens < max_num_scheduled_tokens + (
-                self.speculative_config.max_num_new_slots_for_drafting
-                * self.scheduler_config.max_num_seqs
-            ):
+            if max_num_batched_tokens <= scheduled_token_delta:
                 raise ValueError(
-                    f"VllmConfig received max_num_scheduled_tokens but it does not have"
-                    " enough slots to support the speculative decoding settings."
-                    f" It should be greater by at least {scheduled_token_delta}, but"
-                    f" got {max_num_batched_tokens=} and {max_num_scheduled_tokens=}."
+                    "VllmConfig does not have enough slots to schedule a token and"
+                    " support the speculative decoding settings."
+                    f" Got {max_num_batched_tokens=} and {scheduled_token_delta=}."
                 )
 
     def _set_cudagraph_sizes(self):
@@ -2418,6 +2403,34 @@ class VllmConfig:
                 and self.parallel_config.pipeline_parallel_size > 1
             ):
                 unsupported.append("EAGLE3 with pipeline parallelism")
+
+            if (
+                speculative_config.enable_adaptive_verification
+                and self.lora_config is not None
+            ):
+                # The per-token LoRA mapping is built from CPU placeholder boundaries,
+                # while the trimmed batch's true boundaries are decided on the GPU.
+                unsupported.append("adaptive verification with LoRA")
+
+            if (
+                speculative_config.enable_adaptive_verification
+                and self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+            ):
+                # The draft budget divides by step costs profiled from captured
+                # cudagraphs; eager execution captures none.
+                unsupported.append(
+                    "adaptive verification with enforce_eager/cudagraph_mode=none"
+                )
+
+            if (
+                speculative_config.enable_adaptive_verification
+                and self.parallel_config.pipeline_parallel_size > 1
+            ):
+                # Cost curves and confidences currently only exist on the last PP rank;
+                # earlier ranks would diverge on the trimmed batch shape.
+                # TODO: we should be able to support adaptive verification with PP by
+                # broadcasting the cost curves and confidences to all ranks.
+                unsupported.append("adaptive verification with pipeline parallelism")
 
         if self.parallel_config.enable_dbo:
             unsupported.append("dual batch overlap")
