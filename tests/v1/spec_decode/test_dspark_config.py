@@ -150,6 +150,11 @@ def test_dspark_sequential_sampling_writes_persistent_draft_logits(monkeypatch):
     speculator.use_fp64_gumbel = False
     speculator._step_cols = torch.arange(num_speculative_steps, dtype=torch.int32)
     speculator._draft_topk = None
+    # object.__new__ skips __init__, so every attribute _sample_sequential reads
+    # has to be set here. Upstream #47808 added a read of this one; without it
+    # the test fails with AttributeError from production code that is in fact
+    # correct -- __init__ always sets it. False alarm, not a defect.
+    speculator.enable_adaptive_verification = False
     speculator._d2t_scatter_index = None
     speculator.draft_tokens = torch.empty(
         max_num_reqs,
@@ -221,6 +226,8 @@ def test_dspark_sequential_sampling_writes_persistent_draft_logits(monkeypatch):
             sampled_by_step[col],
         )
 
+    # The common speculator lifecycle still calls this hook. DSpark keeps the
+    # graph-written buffer intact because rejection reads only idx_map rows.
     draft_logits = speculator.draft_logits
     draft_logits_before_clear = draft_logits.clone()
     DSparkSpeculator.clear_runtime_draft_logits(speculator)

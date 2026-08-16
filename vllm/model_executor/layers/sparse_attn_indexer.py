@@ -606,63 +606,67 @@ def sparse_attn_indexer(
                 weights[:num_padded_tokens],
                 seq_lens,
                 decode_metadata.block_table,
-                decode_metadata.schedule_metadata,
-                max_model_len=max_model_len,
-                clean_logits=False,
-                indices=decode_metadata.indices,
+                # Ours. This is fp8_fp4_paged_mqa_topk_indices, our direct-topk
+                # path, which upstream does not have -- git aligned its argument
+                # tail against upstream's tail for fp8_fp4_paged_mqa_logits
+                # below. Upstream's new `indices=` kwarg belongs to THAT call and
+                # is applied there; taking this side alone would have dropped it,
+                # silently, because the kwarg defaults to None.
+                logits_width,
+                topk_indices,
             )
         num_rows = logits.shape[0]
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
-        use_cooperative_topk = (
-            current_platform.is_cuda()
-            and topk_tokens in (512, 1024, 2048)
-            and num_rows <= 32
-            and logits.stride(0) % 4 == 0  # TMA 16-byte alignment
-            and current_platform.has_device_capability(90)
-            and not current_platform.is_device_capability_family(120)
-        )
-        use_persistent_topk = current_platform.is_cuda() and topk_tokens in (
-            512,
-            1024,
-            2048,
-        )
-        if use_cooperative_topk:
-            workspace_manager = current_workspace_manager()
-            (topk_workspace,) = workspace_manager.get_simultaneous(
-                ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
-            )
-            torch.ops._C.cooperative_topk(
-                logits,
-                seq_lens,
-                topk_indices,
-                topk_workspace,
-                topk_tokens,
-                attn_metadata_narrowed.max_seq_len,
-            )
-        elif use_persistent_topk:
-            workspace_manager = current_workspace_manager()
-            (topk_workspace,) = workspace_manager.get_simultaneous(
-                ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
-            )
-            torch.ops._C.persistent_topk(
-                logits,
-                seq_lens,
-                topk_indices,
-                topk_workspace,
-                topk_tokens,
-                logits.shape[1],
-            )
-        else:
-            ops.top_k_per_row_decode(
-                logits,
-                next_n,
-                seq_lens,
-                topk_indices,
-                num_rows,
-                logits.stride(0),
-                logits.stride(1),
-                topk_tokens,
+        if not used_direct_topk:
+            if current_platform.is_xpu():
+                if padded_q_scale is not None:
+                    raise RuntimeError(
+                        "XPU fp8_paged_mqa_logits does not support FP4 Q"
+                    )
+                seq_lens_xpu = (
+                    seq_lens[:, -1].contiguous() if seq_lens.ndim == 2 else seq_lens
+                )
+                logits = torch.ops.vllm.xpu_fp8_paged_mqa_logits(
+                    padded_q_quant_cast,
+                    kv_cache,
+                    weights[:num_padded_tokens],
+                    seq_lens_xpu,
+                    decode_metadata.block_table,
+                    decode_metadata.schedule_metadata,
+                    max_model_len,
+                )
+            else:
+                logits = fp8_fp4_paged_mqa_logits(
+                    (padded_q_quant_cast, padded_q_scale),
+                    kv_cache,
+                    weights[:num_padded_tokens],
+                    seq_lens,
+                    decode_metadata.block_table,
+                    decode_metadata.schedule_metadata,
+                    # ours: the narrowed width, not the model's full window
+                    max_model_len=logits_width,
+                    clean_logits=False,
+                    # upstream #47808 -- landed in the conflict against our
+                    # topk_indices call above, so it has to be re-applied here,
+                    # on the call it actually belongs to
+                    indices=decode_metadata.indices,
+                )
+            num_rows = logits.shape[0]
+
+            # cooperative_topk is upstream's Hopper-tuned TMA top-k kernel.
+            # Keep it OFF for SM12x (capability family 120): consumer Blackwell
+            # keeps the validated SM120 short-row / persistent path below, so
+            # this sync stays behaviour-identical on our boxes. Enabling
+            # cooperative_topk on SM12x is a separate, to-be-validated perf
+            # experiment.
+            use_cooperative_topk = (
+                current_platform.is_cuda()
+                and topk_tokens in (512, 1024, 2048)
+                and num_rows <= 32
+                and logits.stride(0) % 4 == 0  # TMA 16-byte alignment
+                and current_platform.has_device_capability(90)
+                and not current_platform.is_device_capability_family(120)
             )
 
         if decode_metadata.global_seq_lens is not None:

@@ -625,6 +625,35 @@ class VllmConfig:
         # is not otherwise a default-V2 architecture, so force V2 for it. If V2
         # is unsupported for the rest of the config, _validate_v2_model_runner
         # raises rather than silently falling back to V1 (which can't run dspark).
+        #
+        # This fork removed upstream's routing on 2026-08-03 because V2 lost
+        # long-context recall under concurrency (8 samples per runner, same
+        # serve: V1 mean 22.25 [20,24] vs V2 mean 10.50 [6,13], Mann-Whitney
+        # U=0). Restored 2026-08-09: that collapse was NOT a property of the
+        # runner. It was the same-step ghost-block race in the prefix cache
+        # (vllm-project/vllm#42359) -- a block's hash becomes visible before the
+        # forward writes its KV, and a serve that loses the race keeps serving
+        # from the poisoned blocks. With VLLM_ALLOW_SPEC_DEC_SAME_STEP_PREFIX_HIT
+        # on, 4 fresh serves per runner, 3 arthur c=12 runs each:
+        #
+        #   V1  serve means 22.3 / 21.7 / 21.7 / 21.0   gate mean 21.67
+        #   V2  serve means 22.0 / 20.7 / 22.7 / 22.7   gate mean 22.00
+        #   Mann-Whitney p = 0.697, no single-digit serve on either side
+        #
+        # and V2 leads on every other measured axis: pp2048 +3.1/+4.2/+7.1% at
+        # d8192/16384/32768, tg128 +4/+20/+28%, TTFT lower at every depth, KV
+        # +24.9%. GSM8K, issue19, multi-needle and c=1 all tie. (The older
+        # "+6.6% draft acceptance" claim does NOT survive re-measurement: 2.772
+        # V1 vs 2.710 V2, i.e. a tie -- it was measured while V2 was poisoned.)
+        #
+        # VLLM_USE_V2_MODEL_RUNNER=0 still forces V1 -- the env check above takes
+        # precedence over every rule here -- but since #51768 that is no longer
+        # sufficient on its own: _validate_mrv1_piecewise_cudagraph rejects V1 +
+        # PIECEWISE for DeepSeek V4, and PIECEWISE is in the O2/O3 default
+        # (FULL_AND_PIECEWISE). Forcing V1 therefore also needs a cudagraph_mode
+        # without PIECEWISE, e.g. --compilation-config '{"cudagraph_mode":
+        # "FULL_DECODE_ONLY"}'.
+        # See docs/sm120/experiments/2026-08-09-runner-arbitration-786582103a/.
         if (
             self.speculative_config is not None
             and self.speculative_config.method == "dspark"

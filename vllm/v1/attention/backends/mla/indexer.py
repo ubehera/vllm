@@ -34,6 +34,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.mla.compressor_utils import get_compressed_slot_mapping
 from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
+    sparse_short_extend_tiering,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
@@ -831,8 +832,17 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             split_decodes_and_prefills(
                 common_attn_metadata,
                 decode_threshold=self.decode_threshold,
+                # Each side changed a different argument here. Upstream #47808
+                # relaxed require_uniform when varlen paged-MQA logits are
+                # available; our tiering gate on treat_short_extends_as_decodes
+                # matches the three other call sites in this fork
+                # (sparse_swa.py, sparse_mla.py). Taking one side would drop
+                # the other's change silently.
                 require_uniform=not (self.use_flattening or self.supports_varlen),
-                treat_short_extends_as_decodes=not self.use_pcp,
+                treat_short_extends_as_decodes=sparse_short_extend_tiering(
+                    common_attn_metadata
+                )
+                and not self.use_pcp,
             )
         )
 

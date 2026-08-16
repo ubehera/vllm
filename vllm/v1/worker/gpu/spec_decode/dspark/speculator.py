@@ -105,6 +105,15 @@ class DSparkSpeculator(DFlashSpeculator):
         target_model: torch.nn.Module,
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
+        # Take upstream's body whole. The merge-base ALSO had the d2t scatter
+        # assignment; our line lost it in an earlier merge while keeping the
+        # reader at _apply_d2t_scatter, so `self._d2t_scatter_index` was
+        # declared, read, and never assigned -- the branch was dead rather than
+        # broken, which is why nothing failed. Restoring it also brings
+        # upstream #47808's confidence-head requirement for adaptive
+        # verification. Every symbol it needs exists here: draft_logits,
+        # draft_id_to_target_id, enable_adaptive_verification (speculative.py
+        # :248, set at __init__), and confidence_head (our dspark.py).
         model = load_dspark_model(target_model, self.vllm_config)
         # Reduced draft vocab: probabilistic rejection sampling indexes draft
         # logits by target id, so precompute the draft->target column map and a
@@ -122,7 +131,13 @@ class DSparkSpeculator(DFlashSpeculator):
                 dtype=self.draft_logits.dtype,
                 device=self.device,
             )
-        if self.enable_adaptive_verification and model.model.confidence_head is None:
+        # Upstream writes `model.model.confidence_head`, which assumes the draft
+        # model nests its layers under `.model` (qwen3_dspark, gemma4_dspark).
+        # This fork FLATTENED the DeepSeek-V4 DSpark class, so it holds the head
+        # directly and `model.model` raises AttributeError from nn.Module's
+        # __getattr__. Accept both shapes.
+        draft_inner = getattr(model, "model", model)
+        if self.enable_adaptive_verification and draft_inner.confidence_head is None:
             raise ValueError(
                 "Adaptive verification needs a DSpark checkpoint with a confidence "
                 "head, and this one has none. Pass "
