@@ -60,6 +60,9 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
+from vllm.entrypoints.openai.deepseek_v4_chat_kwargs import (
+    apply_deepseek_v4_chat_kwargs,
+)
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, StopParam
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
@@ -363,6 +366,19 @@ class ResponsesRequest(OpenAIBaseModel):
         "top_p": 1.0,
         "top_k": 0,
     }
+
+    def apply_chat_template_kwargs(
+        self,
+        chat_template_kwargs: dict[str, Any],
+        *,
+        model_config: ModelConfig | None = None,
+    ) -> dict[str, Any]:
+        """Normalize DeepSeek-V4 thinking state as chat completions does."""
+        return apply_deepseek_v4_chat_kwargs(
+            chat_template_kwargs,
+            model_name=self.model,
+            model_config=model_config,
+        )
 
     def extract_structured_outputs(self) -> StructuredOutputsParams | None:
         """Normalize request constraints into ``StructuredOutputsParams``."""

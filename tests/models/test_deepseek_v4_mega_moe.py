@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.config import CompilationConfig
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     bind_routed_experts_capturer,
 )
