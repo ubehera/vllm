@@ -59,7 +59,7 @@ class _RecordingPrefillBackend:
     def supports_out(self) -> bool:
         return self._honors_out
 
-    def run_prefill_context_chunk(self, *, chunk, q, k, v, out=None):
+    def run_prefill_context_chunk(self, *, chunk_idx, q, k, v, out=None):
         self.calls.append((q.float().clone(), k.float().clone(), v.float().clone()))
         self.out_destinations.append(out)
         assert out is None or self._honors_out
@@ -76,7 +76,7 @@ class _RecordingPrefillBackend:
         out.fill_(digest)
         lse = torch.full(
             (_NUM_HEADS, num_q),
-            1.0 + chunk.index,
+            1.0 + chunk_idx,
             device=q.device,
             dtype=torch.float32,
         )
@@ -170,6 +170,7 @@ def _build_prefill_metadata(
     chunked_context = build_mla_chunked_context_metadata(
         context_lens_cpu=torch.tensor(_CONTEXT_LENS, dtype=torch.int32),
         prefill_query_start_loc_cpu=query_start_loc_cpu,
+        num_prefills=len(_CONTEXT_LENS),
         chunked_prefill_workspace=workspace,
         chunked_prefill_workspace_size=_WORKSPACE_TOKENS,
         block_size=_BLOCK_SIZE,
@@ -180,7 +181,7 @@ def _build_prefill_metadata(
         dcp_virtual_block_size=1,
     )
     assert chunked_context is not None
-    assert len(chunked_context.chunks) > 1, "the batch must exercise accumulation"
+    assert len(chunked_context.seq_tot) > 1, "the batch must exercise accumulation"
 
     max_blocks = (max(_CONTEXT_LENS) + max(_QUERY_LENS)) // _BLOCK_SIZE + 1
     num_blocks = max_blocks * len(_CONTEXT_LENS)
@@ -277,22 +278,9 @@ def test_fused_context_matches_generic_impl(
     torch.testing.assert_close(fused_out, ref_out, atol=0, rtol=0)
     torch.testing.assert_close(fused_lse, ref_lse, atol=0, rtol=0)
 
-    # Every chunk but the continuation should have been written in place, i.e.
-    # straight into the returned accumulator, with no intermediate copy.
-    wrote_in_place = [
-        out is not None and out.data_ptr() == fused_out[chunk.token_slice].data_ptr()
-        for out, chunk in zip(
-            backend_fused.out_destinations,
-            prefill_fused.chunked_context.chunks,
-            strict=True,
-        )
-    ]
-    continuations = [c.is_continuation for c in prefill_fused.chunked_context.chunks]
-    assert any(continuations), "the batch must exercise a continuation chunk"
-    if honors_out:
-        assert wrote_in_place == [not c for c in continuations]
-    else:
-        assert not any(wrote_in_place)
+    # Aggregate context chunks each cover the whole prefill batch and must be
+    # merged, so none can overwrite the accumulator in place.
+    assert not any(out is not None for out in backend_fused.out_destinations)
 
 
 @torch.inference_mode()

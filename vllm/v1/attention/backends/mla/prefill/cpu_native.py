@@ -11,16 +11,9 @@ into a pluggable ``MLAPrefillBackend``'s ``run_prefill_new_tokens``/
 ``MLAAttention.prefill_backend`` be a real, cloneable object.
 """
 
-from typing import TYPE_CHECKING
-
 import torch
 
 from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
-
-if TYPE_CHECKING:
-    from vllm.model_executor.layers.attention.mla_attention import (
-        MLACommonPrefillMetadata,
-    )
 
 
 class CPUNativeMLAPrefillBackend(MLAPrefillBackend):
@@ -47,7 +40,7 @@ class CPUNativeMLAPrefillBackend(MLAPrefillBackend):
 
     def run_prefill_context_chunk(
         self,
-        chunk: "MLACommonPrefillMetadata.ContextChunk",
+        chunk_idx: int,
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
