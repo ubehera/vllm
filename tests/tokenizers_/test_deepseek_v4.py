@@ -255,6 +255,15 @@ def test_deepseek_v4_thinking_ignores_sampling_controls():
     assert sampling_params.top_k == 0
     assert sampling_params.presence_penalty == 0.0
     assert sampling_params.frequency_penalty == 0.0
+def test_deepseek_v4_unknown_role_raises_value_error():
+    # Invalid roles are client errors: they must surface as ValueError
+    # (mapped to HTTP 400 by the OpenAI serving layer), not
+    # NotImplementedError (mapped to HTTP 501).
+    with pytest.raises(ValueError, match="Invalid role: SYSTEM"):
+        _tokenizer().apply_chat_template(
+            [{"role": "SYSTEM", "content": "Hello"}],
+            tokenize=False,
+        )
 
 
 def test_deepseek_v4_uses_v4_tool_prompt_from_request_tools():

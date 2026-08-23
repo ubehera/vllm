@@ -166,6 +166,7 @@ class TokenspeedMLAPrefillBackend(MLAPrefillBackend):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        out: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         from tokenspeed_mla import tokenspeed_mla_prefill
 
@@ -173,7 +174,8 @@ class TokenspeedMLAPrefillBackend(MLAPrefillBackend):
         chunked = self._prefill_metadata.chunked_context
 
         # See note in run_prefill_new_tokens — `v` is a split-view of `kv_nope`
-        # in `_compute_prefill_context` and arrives non-contiguous.
+        # in the generic `_compute_prefill_context` and arrives non-contiguous.
+        # (K3's fused fp8 K/V pack already hands over a contiguous `v`.)
         v = v.contiguous()
 
         attn_out, lse = tokenspeed_mla_prefill(
@@ -190,6 +192,7 @@ class TokenspeedMLAPrefillBackend(MLAPrefillBackend):
             cum_seq_lens_q=self._prefill_metadata.query_start_loc,
             max_seq_len_q=self._prefill_metadata.max_query_len,
             enable_pdl=False,
+            out=out,
         )
 
         # Convert from (q_len, num_heads) to (num_heads, q_len)

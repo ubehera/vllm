@@ -46,8 +46,7 @@ from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
 from openai.types.responses.tool import Tool
-from openai.types.shared import Metadata
-from openai.types.shared import Reasoning as OpenAIReasoning
+from openai.types.shared import Metadata, Reasoning
 from openai_harmony import Message as OpenAIHarmonyMessage
 from pydantic import (
     Field,
@@ -61,10 +60,7 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
-from vllm.entrypoints.openai.deepseek_v4_chat_kwargs import (
-    apply_deepseek_v4_chat_kwargs,
-)
-from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel
+from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel, StopParam
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
@@ -76,31 +72,6 @@ from vllm.sampling_params import (
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
-
-
-class Reasoning(OpenAIReasoning):
-    """`Reasoning`, widened to accept DeepSeek's `max` effort tier.
-
-    The OpenAI SDK types `ReasoningEffort` as
-    ``Literal["none", "minimal", "low", "medium", "high", "xhigh"]``, so a
-    request carrying DeepSeek's documented top tier, ``max``, was rejected by
-    schema validation before reaching the model -- even though the DeepSeek V4
-    encoding ships a prompt for exactly that tier and
-    `/v1/chat/completions` has always accepted it (see
-    ``ChatCompletionRequest.reasoning_effort``). The two endpoints disagreed
-    about the same model.
-
-    The model itself has three tiers -- ``low``, ``high``, ``max`` -- and
-    ``DeepSeekV4Tokenizer.apply_chat_template`` already folds every other
-    spelling onto one of them (``none`` disables thinking, ``minimal``/``medium``
-    become ``low``, anything else becomes ``high``). Widening the schema is all
-    that was missing for ``max`` to reach it.
-    """
-
-    effort: (  # type: ignore[assignment]
-        Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"] | None
-    ) = None
-
 
 _INT64_MIN = -(2**63)
 _INT64_MAX = 2**63 - 1
@@ -310,7 +281,7 @@ class ResponsesRequest(OpenAIBaseModel):
 
     repetition_penalty: float | None = None
     seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
-    stop: str | list[str] | None = []
+    stop: StopParam = []
     ignore_eos: bool = False
     vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
         default=None,
@@ -392,31 +363,6 @@ class ResponsesRequest(OpenAIBaseModel):
         "top_p": 1.0,
         "top_k": 0,
     }
-
-    def apply_chat_template_kwargs(
-        self,
-        chat_template_kwargs: dict[str, Any],
-        *,
-        model_config: ModelConfig | None = None,
-    ) -> dict[str, Any]:
-        """Normalise DeepSeek-V4 thinking state, as `/v1/chat/completions` does.
-
-        Without this the two endpoints disagreed about the same model: with no
-        thinking kwarg, `DeepSeekV4Tokenizer.apply_chat_template` defaults
-        thinking **on** while `DeepSeekV4ReasoningParser` defaults it **off**
-        and selects `IdentityReasoningParser`. The model reasoned and the
-        reasoning, with a bare ``</think>``, was returned inside
-        ``output_text`` as though it were the answer.
-
-        `reasoning.effort` has already been folded into ``enable_thinking`` by
-        `build_chat_params` when the request carried one, so an explicit
-        ``effort: "none"`` still switches thinking off here.
-        """
-        return apply_deepseek_v4_chat_kwargs(
-            chat_template_kwargs,
-            model_name=self.model,
-            model_config=model_config,
-        )
 
     def extract_structured_outputs(self) -> StructuredOutputsParams | None:
         """Normalize request constraints into ``StructuredOutputsParams``."""
@@ -521,6 +467,8 @@ class ResponsesRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def validate_background(cls, data):
+        if not isinstance(data, dict):
+            return data
         if not data.get("background"):
             return data
         if not data.get("store", True):
@@ -533,6 +481,8 @@ class ResponsesRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def validate_prompt(cls, data):
+        if not isinstance(data, dict):
+            return data
         if data.get("prompt") is not None:
             raise VLLMValidationError(
                 "prompt template is not supported", parameter="prompt"
@@ -553,6 +503,8 @@ class ResponsesRequest(OpenAIBaseModel):
 
         Invalid structures are left for Pydantic to reject.
         """
+        if not isinstance(data, dict):
+            return data
         input_data = data.get("input")
 
         # Early return for None, strings, or bytes

@@ -45,17 +45,7 @@ class FixFunctionalizationPass(VllmInductorPass):
             rope_targets.append(
                 torch.ops.vllm.rocm_aiter_triton_rotary_embedding.default
             )
-        # Upstream #49236 split this op in two: `..._insert` now ALLOCATES its
-        # output and mutates only k_cache, while `..._insert_out` writes into a
-        # caller-supplied q_out. DSv4 attention calls the `_out` form, so it is
-        # the one that must be defunctionalized; registering only the old name
-        # silently loses the copy elision this pass exists to provide.
-        if hasattr(
-            torch.ops._C, "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert_out"
-        ):
-            fused_deepseek_v4_mla_targets.append(
-                torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert_out.default  # noqa: E501
-            )
+        # The allocating fused insert returns Q and mutates only the KV cache.
         if hasattr(torch.ops._C, "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert"):
             fused_deepseek_v4_mla_targets.append(
                 torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert.default
@@ -203,15 +193,6 @@ class FixFunctionalizationPass(VllmInductorPass):
                 self.defunctionalize(graph, node, mutated_args=mutated_args)
             elif at_target in fused_deepseek_v4_mla_targets:
                 if (
-                    hasattr(
-                        torch.ops._C,
-                        "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert_out",
-                    )
-                    and at_target
-                    == torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert_out.default  # noqa: E501
-                ):
-                    mutated_args = {1: "q_out", 2: "k_cache"}
-                elif (
                     hasattr(
                         torch.ops._C,
                         "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert",
