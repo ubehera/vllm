@@ -1,6 +1,6 @@
 model_name: "deepseek-ai/DeepSeek-V4-Flash-DSpark"
 accuracy_threshold: 0.92
-# lower acceptance length since trimming drafts at higher concurrency reduces 
+# lower acceptance length since trimming drafts at higher concurrency reduces
 # acceptance length, this is very loose lower bound for smoke testing
 min_acceptance_length: 1.2
 num_questions: 1319

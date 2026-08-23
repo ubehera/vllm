@@ -223,7 +223,7 @@ echo "[disagg-pd] LOG_PATH=$LOG_PATH"
 
 # ----------------------------------------------------------------------------
 # Launch one container per node via a single srun and hand off to
-# vllm_disagg.sh node (rank-based self-select). 
+# vllm_disagg.sh node (rank-based self-select).
 # ----------------------------------------------------------------------------
 # IPADDRS is the ordered node IP list (prefill IPs first, then decode). IPS[]
 # was built in SELECTED_NODES (alphabetical) order — the same order srun assigns
@@ -484,7 +484,7 @@ run_node_container() {
     local node_rc=${PIPESTATUS[0]}   # docker run exit code (not tee), for rank-0 pass/fail
     # Stop the external router (rank-0 node) once the main container returns.
     if [ "$ROUTER_TYPE" = "vllm-router" ] && [ "$rank" = "0" ]; then
-        docker stop "$ROUTER_CONT_NAME" 2>/dev/null || true; docker rm "$ROUTER_CONT_NAME" 2>/dev/null || true; 
+        docker stop "$ROUTER_CONT_NAME" 2>/dev/null || true; docker rm "$ROUTER_CONT_NAME" 2>/dev/null || true;
     fi
     return "$node_rc"
 }

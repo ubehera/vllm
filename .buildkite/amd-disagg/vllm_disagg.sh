@@ -187,7 +187,7 @@ run_accuracy() {
     log "accuracy -> ${base_url} model=${MODEL_PATH} tasks=${ACCURACY_TASKS} wide_ep_mode=${WIDE_EP_MODE}(${PARALLEL_MODE})"
     log "log=${logf} results=${outdir}"
 
-    # --output_path makes lm_eval persist a results_*.json for scraping. 
+    # --output_path makes lm_eval persist a results_*.json for scraping.
     local eval_rc=0
     ( set -o pipefail
       # Model weights are already served (loaded offline in a separate process);
