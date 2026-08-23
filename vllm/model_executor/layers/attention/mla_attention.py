@@ -1834,7 +1834,7 @@ def build_mla_chunked_context_metadata(
             seq_lens=chunk_seq_lens,
             context_lens=context_lens_cpu.to(device, non_blocking=True),
             token_to_seq=token_to_seq_cpu.to(device, non_blocking=True),
-            chunk_total_token=chunk_total_token,
+            chunk_total_token=chunk_total_token.tolist(),
             workspace=chunked_prefill_workspace,
             has_empty_context=has_empty_context,
             prefill_tokens_with_context=prefill_tokens_with_context,

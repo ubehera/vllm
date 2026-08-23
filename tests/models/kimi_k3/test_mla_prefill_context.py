@@ -182,6 +182,7 @@ def _build_prefill_metadata(
     )
     assert chunked_context is not None
     assert len(chunked_context.seq_tot) > 1, "the batch must exercise accumulation"
+    assert isinstance(chunked_context.chunk_total_token, list)
 
     max_blocks = (max(_CONTEXT_LENS) + max(_QUERY_LENS)) // _BLOCK_SIZE + 1
     num_blocks = max_blocks * len(_CONTEXT_LENS)
