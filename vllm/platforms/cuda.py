@@ -131,6 +131,7 @@ def _get_backend_priorities(
         elif device_capability.major == 12:
             return [
                 AttentionBackendEnum.TRITON_MLA,
+                AttentionBackendEnum.FLASHINFER_MLA_SPARSE_SM90,
                 AttentionBackendEnum.FLASHINFER_MLA_SPARSE_SM120,
             ]
         else:
@@ -757,7 +758,7 @@ class CudaPlatformBase(Platform):
             major, _ = torch.cuda.get_device_capability(device)
         except Exception:
             return False
-        return major >= 9
+        return major >= 9 and major != 12
 
 
 # NVML utils

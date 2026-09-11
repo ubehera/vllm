@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Custom Sparse Attention Indexer layers."""
 
+from functools import cache
 from typing import TYPE_CHECKING
 
 import torch
@@ -42,6 +43,29 @@ elif current_platform.is_xpu():
 logger = init_logger(__name__)
 
 RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
+FILTERED_TOPK_MIN_SHARED_MEMORY = 128 * 1024
+
+
+@cache
+def _cuda_can_use_persistent_topk(device_index: int) -> bool:
+    props = torch.cuda.get_device_properties(device_index)
+    shared_memory = getattr(props, "shared_memory_per_block_optin", None)
+    if not isinstance(shared_memory, int) or shared_memory <= 0:
+        raise RuntimeError(
+            "cannot safely select sparse-indexer TopK: CUDA did not report "
+            "a positive shared_memory_per_block_optin"
+        )
+    if shared_memory < FILTERED_TOPK_MIN_SHARED_MEMORY:
+        logger.warning(
+            "CUDA device %d exposes %d bytes opt-in shared memory (<%d); "
+            "routing sparse-indexer TopK to exact top_k_per_row_decode",
+            device_index,
+            shared_memory,
+            FILTERED_TOPK_MIN_SHARED_MEMORY,
+        )
+        return False
+    return True
+
 
 # MXFP4 layout: 2 values packed per byte, ue8m0 (1-byte) scale per block of 32.
 MXFP4_BLOCK_SIZE = 32
@@ -535,8 +559,8 @@ def sparse_attn_indexer_kpool(
             # expand each pool back to its kpool constituent tokens.
             select_k = topk_tokens // index_kpool if index_kpool > 1 else topk_tokens
             if index_kpool > 1:
-                pool_topk = torch.empty(
-                    (num_rows, select_k), dtype=torch.int32, device=logits.device
+                pool_topk = torch.full(
+                    (num_rows, select_k), -1, dtype=torch.int32, device=logits.device
                 )
                 topk_dst = pool_topk
             else:
@@ -798,14 +822,24 @@ def sparse_attn_indexer_kpool(
         # then expand each pool back to its kpool tokens.
         select_k = topk_tokens // index_kpool if index_kpool > 1 else topk_tokens
         if index_kpool > 1:
-            pool_topk = torch.empty(
-                (num_rows, select_k), dtype=torch.int32, device=logits.device
+            pool_topk = torch.full(
+                (num_rows, select_k), -1, dtype=torch.int32, device=logits.device
             )
             topk_dst = pool_topk
         else:
             topk_dst = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
+        use_persistent_topk = False
         if current_platform.is_cuda() and select_k in (512, 1024, 2048):
+            device_index = logits.device.index
+            if device_index is None:
+                raise RuntimeError(
+                    "cannot safely select sparse-indexer TopK "
+                    "without a CUDA device index"
+                )
+            use_persistent_topk = _cuda_can_use_persistent_topk(device_index)
+
+        if use_persistent_topk:
             workspace_manager = current_workspace_manager()
             (topk_workspace,) = workspace_manager.get_simultaneous(
                 ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
