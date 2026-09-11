@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Custom Sparse Attention Indexer layers."""
 
+from functools import cache
+
 import torch
 
 import vllm.envs as envs
@@ -38,6 +40,32 @@ if current_platform.is_cuda_alike():
     from vllm import _custom_ops as ops
 
 logger = init_logger(__name__)
+
+# vLLM's persistent/cooperative TopK paths assume >=128 KiB opt-in shared
+# memory for their fallbacks. GB10/SM121 exposes 101,376 bytes; route the
+# default ("auto") kpool decode TopK there to the exact per-row kernel.
+FILTERED_TOPK_MIN_SHARED_MEMORY = 128 * 1024
+
+
+@cache
+def _cuda_can_use_persistent_topk(device_index: int) -> bool:
+    props = torch.cuda.get_device_properties(device_index)
+    shared_memory = getattr(props, "shared_memory_per_block_optin", None)
+    if not isinstance(shared_memory, int) or shared_memory <= 0:
+        raise RuntimeError(
+            "cannot safely select sparse-indexer TopK: CUDA did not report "
+            "a positive shared_memory_per_block_optin"
+        )
+    if shared_memory < FILTERED_TOPK_MIN_SHARED_MEMORY:
+        logger.warning(
+            "CUDA device %d exposes %d bytes opt-in shared memory (<%d); "
+            "routing sparse-indexer TopK to exact top_k_per_row_decode",
+            device_index,
+            shared_memory,
+            FILTERED_TOPK_MIN_SHARED_MEMORY,
+        )
+        return False
+    return True
 
 
 # kpool write helper: form pools from the current token batch and compress them
@@ -329,8 +357,8 @@ def sparse_attn_indexer_kpool(
             # expand each pool back to its kpool constituent tokens.
             select_k = topk_tokens // index_kpool if index_kpool > 1 else topk_tokens
             if index_kpool > 1:
-                pool_topk = torch.empty(
-                    (num_rows, select_k), dtype=torch.int32, device=logits.device
+                pool_topk = torch.full(
+                    (num_rows, select_k), -1, dtype=torch.int32, device=logits.device
                 )
                 topk_dst = pool_topk
             else:
@@ -565,18 +593,33 @@ def sparse_attn_indexer_kpool(
         # then expand each pool back to its kpool tokens.
         select_k = topk_tokens // index_kpool if index_kpool > 1 else topk_tokens
         if index_kpool > 1:
-            pool_topk = torch.empty(
-                (num_rows, select_k), dtype=torch.int32, device=logits.device
+            pool_topk = torch.full(
+                (num_rows, select_k), -1, dtype=torch.int32, device=logits.device
             )
             topk_dst = pool_topk
         else:
             topk_dst = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
+        resolved_topk_backend = topk_backend
+        if (
+            topk_backend == "auto"
+            and current_platform.is_cuda()
+            and select_k in (512, 1024, 2048)
+        ):
+            device_index = logits.device.index
+            if device_index is None:
+                raise RuntimeError(
+                    "cannot safely select sparse-indexer TopK "
+                    "without a CUDA device index"
+                )
+            if not _cuda_can_use_persistent_topk(device_index):
+                resolved_topk_backend = "per_row"
+
         # Shared dispatcher with the DSA sparse indexer, so the kpool select
         # honors kernel_config.sparse_indexer_topk_backend and picks between
         # cooperative/persistent by batch size instead of always taking the
         # same kernel.
-        get_indexer_topk(topk_backend)(
+        get_indexer_topk(resolved_topk_backend)(
             logits,
             seq_lens,
             next_n,
