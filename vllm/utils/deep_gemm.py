@@ -365,6 +365,22 @@ def get_mk_alignment_for_contiguous_layout() -> list[int]:
     return [mk_align_size, mk_align_size]
 
 
+# SM12x grouped-contiguous kernels tile M in 64 or 128 rows (DeepGEMM
+# heuristics/sm120.hpp kMinBlockM). vllm-project DeepGEMM derives a per-call
+# alignment only on SM100 and returns the legacy 128 on SM12x, which pads every
+# decode expert to 128 rows and doubles the grouped GEMM and activation-quant
+# work. Use the smaller tile whenever each expert fits in it, as nv_dev did.
+_SM120_CONTIGUOUS_BLOCK_M = (64, 128)
+
+
+def sm120_theoretical_mk_alignment(per_group_m: int | None) -> int:
+    """SM12x per-call BLOCK_M for `per_group_m` routed rows per expert."""
+    small, large = _SM120_CONTIGUOUS_BLOCK_M
+    if per_group_m is not None and per_group_m <= small:
+        return small
+    return large
+
+
 def get_theoretical_mk_alignment_for_contiguous_layout(
     expected_m: int | None = None,
     num_groups: int | None = None,
@@ -382,17 +398,29 @@ def get_theoretical_mk_alignment_for_contiguous_layout(
     _lazy_init()
     if _get_theoretical_mk_alignment_for_contiguous_layout_impl is None:
         return _missing()
-    if num_groups is None:
-        return _get_theoretical_mk_alignment_for_contiguous_layout_impl(expected_m)
-    if num_groups <= 0:
+    if num_groups is not None and num_groups <= 0:
         raise ValueError(f"num_groups must be positive, got {num_groups}")
-    try:
-        return _get_theoretical_mk_alignment_for_contiguous_layout_impl(
-            expected_m, num_groups
+    per_group_m = (
+        expected_m
+        if num_groups is None or expected_m is None
+        else cdiv(expected_m, num_groups)
+    )
+    if num_groups is None:
+        alignment = _get_theoretical_mk_alignment_for_contiguous_layout_impl(
+            expected_m
         )
-    except TypeError:
-        per_group_m = None if expected_m is None else cdiv(expected_m, num_groups)
-        return _get_theoretical_mk_alignment_for_contiguous_layout_impl(per_group_m)
+    else:
+        try:
+            alignment = _get_theoretical_mk_alignment_for_contiguous_layout_impl(
+                expected_m, num_groups
+            )
+        except TypeError:
+            alignment = _get_theoretical_mk_alignment_for_contiguous_layout_impl(
+                per_group_m
+            )
+    if current_platform.is_device_capability_family(120):
+        alignment = min(alignment, sm120_theoretical_mk_alignment(per_group_m))
+    return alignment
 
 
 def set_mk_alignment_for_contiguous_layout(value: int) -> None:
