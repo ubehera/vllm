@@ -99,3 +99,43 @@ def test_kpool_decode_topk_backend_never_auto_selects_aiter_under_full_cudagraph
         )
         == expected
     )
+
+
+class _Props:
+    def __init__(self, shared_memory_per_block_optin: int) -> None:
+        self.shared_memory_per_block_optin = shared_memory_per_block_optin
+
+
+@pytest.fixture
+def _fake_cuda(monkeypatch):
+    from vllm.models.glm5next.nvidia import sparse_indexer
+
+    def install(shared_memory: int):
+        monkeypatch.setattr(sparse_indexer.current_platform, "is_cuda", lambda: True)
+        monkeypatch.setattr(
+            sparse_indexer.torch.cuda,
+            "get_device_properties",
+            lambda index: _Props(shared_memory),
+        )
+        sparse_indexer._cuda_can_use_persistent_topk.cache_clear()
+        return sparse_indexer
+
+    yield install
+    sparse_indexer._cuda_can_use_persistent_topk.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("shared_memory", "expected"), [(101_376, "per_row"), (131_072, "auto")]
+)
+def test_auto_topk_resolves_by_opt_in_shared_memory(
+    _fake_cuda, shared_memory: int, expected: str
+) -> None:
+    """GB10 (101,376 B) must get the exact per-row kernel; >=128 KiB keeps auto."""
+    mod = _fake_cuda(shared_memory)
+    assert mod.resolve_kpool_topk_backend("auto", 512, 0) == expected
+
+
+@pytest.mark.parametrize("backend", ["persistent", "cooperative", "per_row", "torch"])
+def test_explicit_topk_backend_is_never_rewritten(_fake_cuda, backend: str) -> None:
+    mod = _fake_cuda(101_376)
+    assert mod.resolve_kpool_topk_backend(backend, 512, 0) == backend
