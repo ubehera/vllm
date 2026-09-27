@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 import typing
 from collections.abc import Callable, Iterable
+from pathlib import Path
 
 import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -34,6 +37,29 @@ from .model import (
     _try_load_fp8_indexer_wk,
     get_spec_layer_idx_from_weight_name,
 )
+
+logger = init_logger(__name__)
+
+_NVFP4_SCALE_SUFFIXES = ("weight_scale", "weight_scale_2")
+
+
+def mtp_layer_has_quant_scales(weight_names: Iterable[str], layer_idx: int) -> bool:
+    """Whether a checkpoint stores quantization scales for decoder layer
+    ``layer_idx`` (text-only or multimodal ``model.language_model.`` names)."""
+    prefixes = (f"model.language_model.layers.{layer_idx}.", f"model.layers.{layer_idx}.")
+    return any(
+        name.startswith(prefixes) and name.endswith(_NVFP4_SCALE_SUFFIXES)
+        for name in weight_names
+    )
+
+
+def _mtp_layer_is_quantized(model_path: str, layer_idx: int) -> bool | None:
+    """Read the local safetensors index; None when there is none to inspect."""
+    index = Path(model_path) / "model.safetensors.index.json"
+    if not index.is_file():
+        return None
+    weight_map = json.loads(index.read_text())["weight_map"]
+    return mtp_layer_has_quant_scales(weight_map, layer_idx)
 
 
 class Glm5NextMultiTokenPredictorLayer(nn.Module):
@@ -73,14 +99,35 @@ class Glm5NextMultiTokenPredictorLayer(nn.Module):
         # from the prefix (e.g. "...layers.32") so the decoder builds an MLA
         # (DSA) layer rather than KDA for the MTP path.
         layer_idx = int(prefix.rsplit(".", 1)[-1])
-        self.mtp_block = Glm5NextDecoderLayer(
-            vllm_config=vllm_config,
-            config=config,
-            layer_idx=layer_idx,
-            prefix=prefix,
-            topk_indices_buffer=topk_indices_buffer,
-            is_mtp_layer=True,
+        # ModelOpt NVFP4 exports (e.g. nvidia/GLM-5.3-Flash-NVFP4) store the
+        # MTP layer in BF16 without listing it in exclude_modules, like the
+        # Qwen3.5 MTP fc workaround (#38650). Build it unquantized unless the
+        # checkpoint actually carries scales for it.
+        quant_config = vllm_config.quant_config
+        draft_model = vllm_config.speculative_config.draft_model_config.model
+        unquantized_mtp = (
+            quant_config is not None
+            and quant_config.get_name() == "modelopt_fp4"
+            and not _mtp_layer_is_quantized(draft_model, layer_idx)
         )
+        if unquantized_mtp:
+            logger.info(
+                "GLM MTP layer %d has no NVFP4 scales in the checkpoint; "
+                "building it unquantized (BF16).",
+                layer_idx,
+            )
+            vllm_config.quant_config = None
+        try:
+            self.mtp_block = Glm5NextDecoderLayer(
+                vllm_config=vllm_config,
+                config=config,
+                layer_idx=layer_idx,
+                prefix=prefix,
+                topk_indices_buffer=topk_indices_buffer,
+                is_mtp_layer=True,
+            )
+        finally:
+            vllm_config.quant_config = quant_config
 
     def forward(
         self,
