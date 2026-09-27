@@ -68,6 +68,28 @@ def _cuda_can_use_persistent_topk(device_index: int) -> bool:
     return True
 
 
+def resolve_kpool_topk_backend(
+    topk_backend: str, select_k: int, device_index: int | None
+) -> str:
+    """Resolve the kpool decode TopK backend.
+
+    Only the default ("auto") is rewritten: on devices below
+    FILTERED_TOPK_MIN_SHARED_MEMORY it becomes the exact per-row kernel.
+    An explicit backend is always honored.
+    """
+    if (
+        topk_backend != "auto"
+        or not current_platform.is_cuda()
+        or select_k not in (512, 1024, 2048)
+    ):
+        return topk_backend
+    if device_index is None:
+        raise RuntimeError(
+            "cannot safely select sparse-indexer TopK without a CUDA device index"
+        )
+    return topk_backend if _cuda_can_use_persistent_topk(device_index) else "per_row"
+
+
 # kpool write helper: form pools from the current token batch and compress them
 # into the index K cache via the fused Triton kernel.
 
@@ -600,20 +622,9 @@ def sparse_attn_indexer_kpool(
         else:
             topk_dst = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
-        resolved_topk_backend = topk_backend
-        if (
-            topk_backend == "auto"
-            and current_platform.is_cuda()
-            and select_k in (512, 1024, 2048)
-        ):
-            device_index = logits.device.index
-            if device_index is None:
-                raise RuntimeError(
-                    "cannot safely select sparse-indexer TopK "
-                    "without a CUDA device index"
-                )
-            if not _cuda_can_use_persistent_topk(device_index):
-                resolved_topk_backend = "per_row"
+        resolved_topk_backend = resolve_kpool_topk_backend(
+            topk_backend, select_k, logits.device.index
+        )
 
         # Shared dispatcher with the DSA sparse indexer, so the kpool select
         # honors kernel_config.sparse_indexer_topk_backend and picks between

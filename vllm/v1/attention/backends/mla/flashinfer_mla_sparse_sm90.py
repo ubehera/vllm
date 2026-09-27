@@ -156,6 +156,17 @@ class FlashInferMLASparseSM90Backend(AttentionBackend):
                 return "FLASHINFER_MLA_SPARSE_SM90 requires kv_lora_rank=512"
             if hf.qk_rope_head_dim not in (0, 64):
                 return "FLASHINFER_MLA_SPARSE_SM90 requires qk_rope_head_dim in (0, 64)"
+            # On SM12 (101,376 B opt-in SMEM) the FP8 kernel fits only NoPE:
+            # ckv=512,kpe=64 needs 101,888 B at the smallest tile/stage.
+            if (
+                device_capability.major == 12
+                and kv_cache_dtype in ("fp8", "fp8_e4m3")
+                and hf.qk_rope_head_dim != 0
+            ):
+                return (
+                    "FLASHINFER_MLA_SPARSE_SM90 fp8 KV on SM12 supports NoPE MLA "
+                    "only (qk_rope_head_dim=0)"
+                )
         return None
 
     @staticmethod
