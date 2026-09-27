@@ -41,6 +41,7 @@ def test_plan_dtype_matches_cache_view(storage_dtype, fp8, expected_dtype):
             max_num_batched_tokens=24, async_scheduling=False
         ),
         model_config=SimpleNamespace(hf_text_config=SimpleNamespace(index_topk=2048)),
+        speculative_config=None,
     )
     spec = SimpleNamespace(dtype=storage_dtype, tokens_per_state=4)
     # Isolate the subclass contract from distributed setup and GPU allocation.
