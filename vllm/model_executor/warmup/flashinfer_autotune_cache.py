@@ -79,6 +79,41 @@ def sync_flashinfer_autotune_cache(
             raise RuntimeError("FlashInfer autotune cache is incompatible")
 
 
+def merge_peer_autotune_configs(tuner, group: "GroupCoordinator") -> int:
+    """Load every other rank's tuned configs into the leader's tuner.
+
+    FlashInfer's MoE tuning keys carry the TP/EP rank, so a cache holding only
+    the leader's configs misses on every other rank after a reload. Those
+    ranks then re-profile while the leader hits, and FlashInfer's per-tactic
+    reduce (which requires identical caches on all ranks) stalls. Saving the
+    union makes a reload hit identically everywhere. Every rank must call
+    this; returns the number of peer config files the leader loaded.
+    """
+    import torch.distributed as dist
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        local = Path(temp_dir) / "rank_configs.json"
+        tuner.save_configs(str(local))
+        payload = local.read_text()
+    gathered: list[str | None] = [None] * group.world_size
+    dist.all_gather_object(gathered, payload, group=group.cpu_group)
+    if group.rank_in_group != 0:
+        return 0
+    loaded = 0
+    with tempfile.TemporaryDirectory() as temp_dir:
+        for rank, text in enumerate(gathered):
+            if rank == 0 or text is None:
+                continue
+            peer = Path(temp_dir) / f"rank{rank}_configs.json"
+            peer.write_text(text)
+            if not tuner.load_configs(str(peer)):
+                raise RuntimeError(
+                    f"FlashInfer autotune configs from rank {rank} are incompatible"
+                )
+            loaded += 1
+    return loaded
+
+
 def write_flashinfer_autotune_cache(cache_path: Path, contents: bytes) -> None:
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(

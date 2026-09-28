@@ -17,6 +17,7 @@ from vllm.model_executor.warmup.b12x_warmup import b12x_warmup
 from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 from vllm.model_executor.warmup.flashinfer_autotune_cache import (
+    merge_peer_autotune_configs,
     resolve_flashinfer_autotune_file,
     write_flashinfer_autotune_cache,
 )
@@ -478,5 +479,6 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
 
     if world.world_size > 1:
         world.barrier()
+        merge_peer_autotune_configs(tuner, world)
     if is_leader:
         tuner.save_configs(str(cache_path))
