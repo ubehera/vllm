@@ -27,7 +27,7 @@ if(DEEPGEMM_SRC_DIR)
   set(deepgemm_SOURCE_DIR "${DEEPGEMM_SRC_DIR}")
   message(STATUS "DeepGEMM using local DEEPGEMM_SRC_DIR: ${deepgemm_SOURCE_DIR}")
 else()
-  set(_DEEPGEMM_UPSTREAM_REPO "https://github.com/vllm-project/DeepGEMM.git")
+  set(_DEEPGEMM_UPSTREAM_REPO "https://github.com/ubehera/DeepGEMM.git")
   # Pinned to the fork's dev branch: upstream's 26/09/30 release (2.8.1)
   # plus the SM120 port, the SM90 paged-MQA kv_block=32/next_n=4 port,
   # configurable SwiGLU alpha/beta, SiTU for FP8/FP4 Mega MoE, and NVFP4
@@ -37,7 +37,7 @@ else()
   # (vllm-project/DeepGEMM#39), and the MX MegaMoE alignment fix
   # (vllm-project/DeepGEMM#43).
   # Uses the PyTorch 2.11 stable ABI and CPython 3.10 limited API.
-  set(_DEEPGEMM_UPSTREAM_TAG "5cdb145704ec4672ecf4b61441599521ce635df6")
+  set(_DEEPGEMM_UPSTREAM_TAG "e53d8a7035f4e6d2774585546af15a20c124ed95")
 
   set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _deepgemm_fc_root)
