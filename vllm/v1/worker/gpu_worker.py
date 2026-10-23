@@ -100,6 +100,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (
     AsyncModelRunnerOutput,
     DraftTokenIds,
+    KVConnectorOutput,
     ModelRunnerOutput,
 )
 from vllm.v1.utils import compute_iteration_details, report_usage_stats
@@ -194,6 +195,73 @@ class AsyncIntermediateTensors(IntermediateTensors):
         if name == "tensors" and not object.__getattribute__(self, "_comm_waited"):
             object.__getattribute__(self, "wait_for_comm")()
         return object.__getattribute__(self, name)
+
+
+class _RoceCheckedAsyncOutput(AsyncModelRunnerOutput):
+    """An asynchronous output whose completion is followed by the RoCEnante check."""
+
+    def __init__(self, inner: AsyncModelRunnerOutput, check: Callable[[], None]):
+        self._inner = inner
+        self._check = check
+
+    def get_output(self) -> ModelRunnerOutput:
+        """Wait for the wrapped output, then run the fail-stop check.
+
+        Raises:
+            RuntimeError: When a RoCEnante wait timed out or its proxy died.
+
+        """
+        output = self._inner.get_output()
+        self._check()
+        return output
+
+    def get_kv_connector_output(self) -> KVConnectorOutput | None:
+        return self._inner.get_kv_connector_output()
+
+
+def _roce_health_check() -> Callable[[], None] | None:
+    """The RoCEnante health check of the TP communicator, if one is active.
+
+    Returns:
+        The check callable, or None when RoCEnante is not in use.
+
+    """
+    communicator = getattr(get_tp_group(), "device_communicator", None)
+    roce_comm = getattr(communicator, "roce_comm", None)
+    if roce_comm is None or roce_comm.disabled:
+        return None
+    return roce_comm.check_health
+
+
+def _roce_guarded(output):
+    """Fail-stop RoCEnante check once the step's output is on the host.
+
+    A RoCEnante wait that times out records itself and poisons the runtime;
+    graph replays cannot raise inline. A synchronous output already holds the
+    sampled tokens on the host, so every collective of the step has completed
+    and the check runs now; an asynchronous output is wrapped so the check runs
+    right after its ``get_output()`` completes the copy. Either way a failed
+    collective's output never leaves the worker. Every rank reaches the same
+    state on its own (a stalled rank starves its peers' waits). The check is
+    two host-memory reads.
+
+    Args:
+        output: The model runner's output for this step, possibly None.
+
+    Returns:
+        The same output, or a wrapper for an asynchronous output.
+
+    Raises:
+        RuntimeError: When a RoCEnante wait timed out or its proxy died.
+
+    """
+    check = _roce_health_check()
+    if check is None:
+        return output
+    if isinstance(output, AsyncModelRunnerOutput):
+        return _RoceCheckedAsyncOutput(output, check)
+    check()
+    return output
 
 
 class Worker(WorkerBase):
@@ -1336,7 +1404,7 @@ class Worker(WorkerBase):
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
-        return self.model_runner.sample_tokens(grammar_output)
+        return _roce_guarded(self.model_runner.sample_tokens(grammar_output))
 
     @torch.inference_mode()
     @with_gpu_sync_check
@@ -1378,7 +1446,7 @@ class Worker(WorkerBase):
             if isinstance(
                 output, ModelRunnerOutput | AsyncModelRunnerOutput | NoneType
             ):
-                return output
+                return _roce_guarded(output)
 
         assert isinstance(output, IntermediateTensors)
         parallel_config = self.vllm_config.parallel_config
@@ -1398,7 +1466,8 @@ class Worker(WorkerBase):
 
         if self.use_v2_model_runner and self.model_runner.is_pooling_model:
             return self.model_runner.pool()  # type: ignore
-        return None
+        # Earlier pipeline stages have their own TP group to check.
+        return _roce_guarded(None)
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.model_runner.take_draft_token_ids()
