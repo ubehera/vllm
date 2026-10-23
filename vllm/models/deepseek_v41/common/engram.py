@@ -616,7 +616,39 @@ def _engram_head_shard_weight_loader(
     assert shard.shape == param.shape, (
         f"engram shard {tuple(shard.shape)} does not fit param {tuple(param.shape)}"
     )
-    param.data.copy_(shard)
+    _copy_rows_to_device(param.data, shard)
+
+
+# Bounce-buffer size for host-to-device Engram shard copies.
+_ENGRAM_COPY_CHUNK_BYTES = 256 << 20
+
+
+def _copy_rows_to_device(dst: torch.Tensor, src: torch.Tensor) -> None:
+    """Copy a host tensor to the device in row chunks through a pinned buffer.
+
+    The checkpoint tensor is a read-only mmap of the safetensors file, and one
+    Engram shard is a single multi-GB slice. A direct copy_ makes the CUDA driver
+    long-term pin those page-cache pages for the DMA; pages in ZONE_MOVABLE must
+    first be migrated out one at a time, which on GB10 (unified memory, a
+    fragmented Normal zone) ran at ~5 MB/s for a 12.3 GB shard. Staging through
+    one pinned buffer reads the page cache with ordinary CPU loads and DMAs from
+    memory that is already pinned (~58 GB/s each on GB10). Host destinations
+    (CPU-offloaded tables) keep the plain copy.
+    """
+    if dst.device.type != "cuda" or src.device.type != "cpu" or src.dim() == 0:
+        dst.copy_(src)
+        return
+    row_bytes = max(1, src[0].numel() * src.element_size())
+    rows = max(1, _ENGRAM_COPY_CHUNK_BYTES // row_bytes)
+    if src.shape[0] <= rows:
+        dst.copy_(src)
+        return
+    bounce = torch.empty((rows, *src.shape[1:]), dtype=src.dtype, pin_memory=True)
+    for start in range(0, src.shape[0], rows):
+        n = min(rows, src.shape[0] - start)
+        bounce[:n].copy_(src[start : start + n])
+        # Blocking copy: the buffer is reused only after the DMA completed.
+        dst[start : start + n].copy_(bounce[:n], non_blocking=False)
 
 
 # Branching on SORTED at runtime intermittently crashes Triton 3.8's
