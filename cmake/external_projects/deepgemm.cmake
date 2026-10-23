@@ -27,14 +27,17 @@ if(DEEPGEMM_SRC_DIR)
   set(deepgemm_SOURCE_DIR "${DEEPGEMM_SRC_DIR}")
   message(STATUS "DeepGEMM using local DEEPGEMM_SRC_DIR: ${deepgemm_SOURCE_DIR}")
 else()
-  set(_DEEPGEMM_UPSTREAM_REPO "https://github.com/vllm-project/DeepGEMM.git")
+  set(_DEEPGEMM_UPSTREAM_REPO "https://github.com/ubehera/DeepGEMM.git")
   # Pinned to the fork's dev branch: upstream's 26/09/30 release (2.8.1)
   # plus the SM120 port, the SM90 paged-MQA kv_block=32/next_n=4 port,
   # configurable SwiGLU alpha/beta, SiTU for FP8/FP4 Mega MoE, and NVFP4
   # Mega MoE, plus swiglustep for BF16/FP8/NVFP4 Mega MoE and F8_128x4
   # SFs for the FP8 einsum output (vllm-project/DeepGEMM#40).
   # Uses the PyTorch 2.11 stable ABI and CPython 3.10 limited API.
-  set(_DEEPGEMM_UPSTREAM_TAG "727f847082d2e7946f70dc02b94949db206310d3")
+  # homeailab GB10: 727f847 plus vllm-project/DeepGEMM#28's SM120 commit
+  # (79a4ef3b44), so the DeepSeek-V4.1 FP8 indexer can use 128-state pages on
+  # SM12x (branch gb10-sm12x-page128-727f847). Drop once #28 is in the pin.
+  set(_DEEPGEMM_UPSTREAM_TAG "9bce23b7fb29fc7a4d27b12be261c722b82cdef7")
 
   set(_deepgemm_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _deepgemm_fc_root)
