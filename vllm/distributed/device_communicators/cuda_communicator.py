@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from typing import TYPE_CHECKING
+
 import torch
 from torch.distributed import ProcessGroup
 
@@ -25,6 +27,9 @@ from ..utils import StatelessProcessGroup
 from .aiter_custom_all_reduce import AiterCustomAllreduce
 from .base_device_communicator import DeviceCommunicatorBase
 
+if TYPE_CHECKING:
+    from .b12x_roce_all_reduce import B12xRoceAllReduce
+
 logger = init_logger(__name__)
 
 # Since NCCL 2.29.2, ncclSymkPickKernel accepts registered input with
@@ -33,6 +38,11 @@ NCCL_DIRECT_SYMM_RS_OUTPUT_MIN_VERSION = 22902
 
 
 class CudaCommunicator(DeviceCommunicatorBase):
+    # Opt-in multi-node RoCE collectives (VLLM_ENABLE_ROCE_ALLREDUCE=1, TP group
+    # only). The class default keeps communicators built without __init__
+    # dispatching exactly as before.
+    roce_comm: "B12xRoceAllReduce | None" = None
+
     def __init__(
         self,
         cpu_group: ProcessGroup,
@@ -61,6 +71,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             use_flashinfer_allreduce = False
             use_flashinfer_pcie_ipc_allreduce = False
             use_aiter_allreduce = False
+            use_roce_allreduce = False
         else:
             from vllm.distributed.parallel_state import _ENABLE_CUSTOM_ALL_REDUCE
 
@@ -80,12 +91,18 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 and not envs.VLLM_BATCH_INVARIANT
                 and bool(rocm_aiter_ops.is_custom_all_reduce_enabled())
             )
+            # RoCEnante does not depend on the CUDA-IPC custom all-reduce:
+            # that one is single-node, and multi-node launches disable it.
+            use_roce_allreduce = (
+                envs.VLLM_ENABLE_ROCE_ALLREDUCE and current_platform.is_cuda()
+            )
 
         self.use_custom_allreduce = use_custom_allreduce
         self.use_torch_symm_mem = use_torch_symm_mem
         self.use_flashinfer_allreduce = use_flashinfer_allreduce
         self.use_flashinfer_pcie_ipc_allreduce = use_flashinfer_pcie_ipc_allreduce
         self.use_aiter_allreduce = use_aiter_allreduce
+        self.use_roce_allreduce = use_roce_allreduce
 
         # lazy import to avoid documentation build error
         from vllm.distributed.device_communicators.custom_all_reduce import (
@@ -196,6 +213,19 @@ class CudaCommunicator(DeviceCommunicatorBase):
             # an MI300 series.
             self.qr_comm = QuickAllReduce(group=self.cpu_group, device=self.device)
 
+        if self.use_roce_allreduce and self.world_size > 1:
+            # RoCEnante: b12x one-shot RDMA collectives for TP groups that span
+            # nodes (DGX Spark). Declines on single-node groups; all ranks
+            # enable it together or none does.
+            from vllm.distributed.device_communicators.b12x_roce_all_reduce import (  # noqa: E501
+                B12xRoceAllReduce,
+            )
+
+            self.roce_comm = B12xRoceAllReduce(
+                group=self.cpu_group,
+                device=self.device,
+            )
+
         if self.world_size > 1:
             self._log_all_reduce_backend_selection()
 
@@ -294,6 +324,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         depends on the input tensor.
         """
         all_potential_ar_backends = [
+            "ROCENANTE",
             "FLASHINFER_PCIE_IPC",
             "FLASHINFER",
             "NCCL_SYMM_MEM",
@@ -304,6 +335,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
             "PYNCCL",
         ]
         enabled_ar_backends: list[str] = []
+        if self.roce_comm is not None and not self.roce_comm.disabled:
+            enabled_ar_backends.append(self.roce_comm.backend_name)
         if (
             self.fi_pcie_ipc_ar_comm is not None
             and not self.fi_pcie_ipc_ar_comm.disabled
@@ -360,6 +393,11 @@ class CudaCommunicator(DeviceCommunicatorBase):
         )
 
     def all_reduce(self, input_):
+        # Opt-in multi-node backend first; eligibility is rank-invariant
+        # (dtype, shape, contiguity, size), so every rank routes alike.
+        roce_comm = self.roce_comm
+        if roce_comm is not None and roce_comm.should_all_reduce(input_):
+            return roce_comm.all_reduce(input_)
         fi_ar_comm = self.fi_ar_comm
         use_fi_ar = (
             fi_ar_comm is not None
@@ -464,6 +502,13 @@ class CudaCommunicator(DeviceCommunicatorBase):
         # gather-before-GEMM uses dim=0 with tp-aligned (uniform) shards.
         if dim < 0:
             dim += input_.dim()
+        # RoCEnante gathers equal contiguous shards along dim 0 or the last dim
+        # straight into the concatenated layout. Only this uniform all_gather
+        # is routed: all_gatherv and reduce_scatter(v), which the EP/DP
+        # all2all managers use, stay on NCCL.
+        roce_comm = self.roce_comm
+        if roce_comm is not None and roce_comm.should_all_gather(input_, dim):
+            return roce_comm.all_gather(input_, dim)
         if dim == 0 and should_nccl_symm_mem_ag_rs():
             return self._all_gather_symm_mem(input_.contiguous())
 
@@ -804,6 +849,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
             raise ValueError("No PyNCCL communicator found")
 
     def destroy(self):
+        if self.roce_comm is not None:
+            # Waits for in-flight kernels, then stops the RDMA proxy.
+            self.roce_comm.destroy()
+            self.roce_comm = None
         if self.pynccl_comm is not None:
             self.pynccl_comm.destroy()
             self.pynccl_comm = None
